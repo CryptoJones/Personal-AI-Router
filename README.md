@@ -303,7 +303,7 @@ NVIDIA team members working on PAIR:
 | Preston Goode | [@nv-pgoode](https://github.com/nv-pgoode) | PAIR Developer - Engine Management Lead |
 | Kaylee Lubick | | PAIR Developer - Security Lead |
 | Lucas Brodzinski | [@LB-NV](https://github.com/lb-nv) | PAIR Technical Program Manager |
-| Ambrish Dantrey | | PAIR Engineering Manager |
+| Ambrish Dantrey | [@adantrey](https://github.com/adantrey) | PAIR Engineering Manager |
 | Seth Schneider | [@NV-sschneider](https://github.com/NV-sschneider) | PAIR Product Manager |
 
 ## Contributing and governance
