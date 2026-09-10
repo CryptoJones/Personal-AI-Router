@@ -252,24 +252,59 @@ Component references, for when you already know what you are looking for:
 See the [releases page](https://github.com/NVIDIA/Personal-AI-Router/releases)
 for what changed in each release.
 
-## Where PAIR is going
+## Roadmap
 
-We have plenty of ideas about where to take PAIR, and no fixed commitments about
-which of them land or when. If you have a thought about the product's direction,
-something that would make it more useful to you, a workflow it does not support
-yet, or a use we have not considered — we would like to hear it. Open an issue
-and start the conversation.
+These are features we want to add to PAIR. This list is a direction for the
+project, not a commitment to delivery or implementation order. Community
+feedback and contributions will help shape priorities.
 
-**Routing is the clearest example.** Today PAIR ships a single scheduling policy
-that combines queued work with a coarse, smoothed GPU-utilization signal. It does
-not consider GPU model, available memory, model warmness, or how expensive a
-request looks, which still makes it a better fit for similar machines than a
-highly mixed cluster. Making that smarter, and likely letting you choose a
-policy, is something we want to do — and hearing which of those signals matters
-on your hardware is exactly the kind of input that would shape it.
+### Platform support
 
-Feedback from people running PAIR on their own hardware is more useful to us than
-any plan written in advance.
+- [ ] Full support for Windows ARM64 systems.
+- [ ] DGX Station support.
+
+### Engines and integrations
+
+- [ ] llama.cpp support.
+- [ ] vLLM support.
+- [ ] EXO support.
+- [ ] ComfyUI integration.
+- [ ] Unsloth support.
+- [ ] Tailscale integration.
+
+### Routing and clusters
+
+- [ ] Route OpenAI-compatible API requests across different inference engines.
+- [ ] Inference request queuing.
+- [ ] Increase number of scheduler variables for better QoS.
+- [ ] A "cluster as a node" view.
+- [ ] KV cache-aware scheduling.
+
+### Usability and reliability
+
+- [ ] Requester-only clients that send work without hosting an inference engine.
+- [ ] Launch PAIR automatically on system startup.
+- [ ] Configure engine launch options and environment variables from PAIR.
+- [ ] Stability and reliability improvements informed by real-world use.
+
+Have a feature request or a workflow you want PAIR to support? Open an
+[issue](https://github.com/NVIDIA/Personal-AI-Router/issues) and tell us how you
+would use it.
+
+## Development Team
+
+NVIDIA team members working on PAIR:
+
+| Name | GitHub | Role |
+| --- | --- | --- |
+| Noah Tervalon (Terve) | [@Noah-Tervalon-Nvidia](https://github.com/Noah-Tervalon-Nvidia) | PAIR Developer - Community Lead |
+| Chris Kelsey | [@ckelseynv](https://github.com/ckelseynv) | PAIR Developer - UI/UX Lead |
+| Sherief Farouk | [@sherief-nv](https://github.com/sherief-nv) | PAIR Developer - Scheduling, Team Lead |
+| Preston Goode | [@nv-pgoode](https://github.com/nv-pgoode) | PAIR Developer - Engine Management Lead |
+| Kaylee Lubick | [@kjlubick](https://github.com/kjlubick) | PAIR Developer - Security Lead |
+| Lucas Brodzinski | [@LB-NV](https://github.com/lb-nv) | PAIR Technical Program Manager |
+| Ambrish Dantrey | [@adantrey](https://github.com/adantrey) | PAIR Engineering Manager |
+| Seth Schneider | [@NV-sschneider](https://github.com/NV-sschneider) | PAIR Product Manager |
 
 ## Contributing and governance
 
