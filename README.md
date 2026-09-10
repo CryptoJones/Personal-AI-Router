@@ -301,7 +301,7 @@ NVIDIA team members working on PAIR:
 | Chris Kelsey | [@ckelseynv](https://github.com/ckelseynv) | PAIR Developer - UI/UX Lead |
 | Sherief Farouk | [@sherief-nv](https://github.com/sherief-nv) | PAIR Developer - Scheduling, Team Lead |
 | Preston Goode | [@nv-pgoode](https://github.com/nv-pgoode) | PAIR Developer - Engine Management Lead |
-| Kaylee Lubick | | PAIR Developer - Security Lead |
+| Kaylee Lubick | [@kjlubick](https://github.com/kjlubick) | PAIR Developer - Security Lead |
 | Lucas Brodzinski | [@LB-NV](https://github.com/lb-nv) | PAIR Technical Program Manager |
 | Ambrish Dantrey | [@adantrey](https://github.com/adantrey) | PAIR Engineering Manager |
 | Seth Schneider | [@NV-sschneider](https://github.com/NV-sschneider) | PAIR Product Manager |
