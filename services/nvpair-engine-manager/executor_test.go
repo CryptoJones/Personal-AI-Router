@@ -140,6 +140,34 @@ func TestActionTimeoutSFollowsManifestNotEngineName(t *testing.T) {
 	})
 }
 
+// TestBundledLMStudioChatDeclaresResponseHeaderBudget pins issue #25 end to
+// end: the engine in the bug report (LM Studio's chat action) must opt into a
+// response-header budget beyond the 30s default, or the manifest field is dead
+// code for the exact action that timed out. A cold model load or long prefill
+// can delay the first byte by minutes; the executor's action timeout still
+// bounds the total call.
+func TestBundledLMStudioChatDeclaresResponseHeaderBudget(t *testing.T) {
+	reg := NewRegistry()
+	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
+		t.Fatalf("LoadFS bundled: %v", err)
+	}
+	m, ok := reg.Get("lmstudio")
+	if !ok {
+		t.Fatal("bundled lmstudio manifest missing")
+	}
+	chat, ok := m.Actions["chat"]
+	if !ok {
+		t.Fatal("bundled lmstudio chat action missing")
+	}
+	if chat.HTTP == nil {
+		t.Fatal("lmstudio chat must remain an http action for timeout_s to apply")
+	}
+	defaultS := int(engineResponseHeaderTimeout / time.Second)
+	if chat.TimeoutS <= defaultS {
+		t.Fatalf("lmstudio chat timeout_s = %d, want > %d (issue #25: the reported action would still get the ordinary response-header budget)", chat.TimeoutS, defaultS)
+	}
+}
+
 // TestActionClientCachesPerDeclaredTimeout checks the client-selection helper:
 // unset and default values reuse the shared client; distinct declared values
 // each get one cached client with the right response-header bound.
