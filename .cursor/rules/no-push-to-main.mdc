@@ -1,0 +1,54 @@
+---
+description: Never push directly to main; always use a feature branch and GitLab MR
+alwaysApply: true
+---
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Never push to main
+
+Agents must **never** push to `main` (or `master`) on any remote — including
+`gitlab` and `origin`.
+
+## Required workflow
+
+1. Create or switch to a **feature branch** (never commit intended work only on
+   `main` if it will be pushed).
+2. Commit on that branch with `git commit -s` — every commit needs a DCO
+   sign-off trailer (see `commit-sign-off.mdc`).
+3. Push the **feature branch** only: `git push -u gitlab HEAD` or
+   `git push -u gitlab <branch-name>`.
+4. Open a **GitLab merge request** into `main`. Do not merge unless the user
+   explicitly asks.
+
+## Explicit bans
+
+- `git push … main`, `git push … HEAD:main`, or any refspec that updates
+  `refs/heads/main` / `refs/heads/master` on a remote.
+- Force-pushing `main` / `master` unless the user **explicitly** requests that
+  exact force update in the current message (and even then, prefer
+  `--force-with-lease` and confirm the target SHA).
+- Treating “commit and push” as permission to push `main`. That phrase means
+  push the **current feature branch**.
+
+## If already on main locally
+
+When the user asks to commit/push and `git branch --show-current` is `main`:
+
+1. Create a feature branch from the commits (or before committing).
+2. Push that branch.
+3. Point the user at an MR URL.
+
+Do **not** push `main` “just this once.”
+
+## Related
+
+- Signing off each commit: `commit-sign-off.mdc`.
+- Dual-remote / public-cut rules: `repository-sync.mdc` and
+  `.cursor/skills/pair-repo-sync/SKILL.md`.
+- Those rules already forbid pushing GitLab `main` to GitHub; this rule forbids
+  pushing **to** GitLab `main` as well.
+- Filling the MR description / `pair-release-intent` block:
+  `.cursor/skills/pair-gitlab-mr/SKILL.md`.
