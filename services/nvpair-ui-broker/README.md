@@ -15,7 +15,7 @@ the broker from the same installation directory. The broker is the parent
 process and canonical backend entry point: it supervises the worker subprocesses
 on the UI's behalf, speaking JSON-RPC over stdio.
 
-The broker supervises **eleven** worker subprocesses, so a client gets the whole
+The broker supervises **ten** worker subprocesses, so a client gets the whole
 backend behind one endpoint. Each is spawned at startup and relayed under its own
 namespace:
 
@@ -23,8 +23,7 @@ namespace:
 | --- | --- | --- |
 | `nvpair-node-scanner` | Discovery daemon: advertises this host's one `_nvpair-node._tcp` record and browses the LAN | `discovery:*` |
 | `nvpair-node-info` | Local GPU / CPU / memory inventory over HTTP at `/v1/node-info` | — (HTTP only) |
-| `ollama-proxy` | Ollama-compatible inference proxy and router | `ollama-proxy:*` |
-| `lmstudio-proxy` | The LM Studio counterpart, supervised identically | `lmstudio-proxy:*` |
+| `nvpair-proxy` | One process hosting an inference proxy and router facade per enabled engine | `ollama-proxy:*`, `lmstudio-proxy:*` |
 | `nvpair-engine-manager` | Local engine and model control plane; also serves `GET /v1/models` to peers | `engine:*` |
 | `nvpair-cluster-manager` | Node identity, trusted-node store, PIN pairing | `cluster:*`, `nodes:*` |
 | `nvpair-workload-manager` | Cluster workload relay between this node and peers | `workloads:*` |
