@@ -206,7 +206,7 @@ cd tests
 go test ./...
 ```
 
-Expect this to take a few minutes. Run it before opening a merge request, and
+Expect this to take a few minutes. Run it before opening a pull request, and
 after any change to a JSON-RPC method, payload, or notification.
 
 ### Tests that skip themselves

@@ -65,19 +65,19 @@ npm run service-contracts:check
    and `npm run typecheck`.
 9. Commit `services/` and desktop integration edits together.
 
-## Version bumps depend on the remote
+## Version bumps are declared in the pull request
 
-On GitLab, declare bumps in the merge request `pair-release-intent:v1` block and
-leave `services/versions.json` and root `CHANGELOG.md` alone — `validate:release-intent`
-fails a hand edit without `<!-- pair-release-intent-allow-owned-files -->`, and
-`apply:release-intent` writes both files after merge. See
-`.cursor/skills/pair-gitlab-mr/SKILL.md` and `ci/release-intent/README.md`.
+Declare bumps in the pull request `pair-release-intent:v1` block and leave
+`services/versions.json` alone — `release-intent-check.yml` fails a hand edit
+without `<!-- pair-release-intent-allow-owned-files -->`, and
+`release-intent-apply.yml` writes the file after merge. See
+`.cursor/skills/pair-github-pr/SKILL.md` and
+`scripts/release-intent/README.md`.
 
-GitHub has no such pipeline, and the cut deletes `ci/`, so a contributor there
-edits both files by hand. The public docs (`services/VERSIONING.md`,
-`services/readme.md`, `CONTRIBUTING.md`, `CHANGELOG.md`) describe the manual path
-as the default and must not mention internal release tooling, instruct readers to
-declare a release in a merge request, or point at `ci/release-intent/`.
+A contributor working from a fork cannot run the apply workflow, so
+`services/VERSIONING.md`, `services/readme.md` and `CONTRIBUTING.md` describe
+editing `services/versions.json` by hand. Keep that path documented; reconcile
+the two during review rather than asking contributors to leave the file alone.
 
 ## Rules
 
