@@ -287,7 +287,7 @@ feedback and contributions will help shape priorities.
 
 - [ ] Requester-only clients that send work without hosting an inference engine.
 - [ ] Launch PAIR automatically on system startup.
-- [ ] Configure engine launch options and environment variables from PAIR.
+- [x] Configure engine launch options and environment variables from PAIR.
 - [ ] Stability and reliability improvements informed by real-world use.
 
 Have a feature request or a workflow you want PAIR to support? Open an
