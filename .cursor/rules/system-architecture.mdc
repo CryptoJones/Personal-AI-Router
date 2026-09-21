@@ -25,8 +25,11 @@ The canonical inventory is `src/shared/constants/modular-binaries.ts`.
 
 Broker-owned workers:
 
-- `ollama-proxy`;
-- `lmstudio-proxy`;
+- `nvpair-proxy`, one process hosting a facade per enabled engine. It starts
+ with no engine and no listener; the broker sends a `facade/enable` per engine
+ carrying that engine's port. Clients still address each facade as
+ `ollama-proxy:` / `lmstudio-proxy:`, and one supervisor covers them all, so a
+ crash is reported against `nvpair-proxy` and restarts every facade together;
 - `nvpair-node-scanner`;
 - `nvpair-node-info`;
 - `nvpair-workload-manager`;

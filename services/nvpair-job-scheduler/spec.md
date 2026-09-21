@@ -14,7 +14,7 @@ Decides **where inference should go**. On every accepted workload, discovery, or
 effective GPU-pressure change, with a periodic timer as reconciliation, the Job
 Scheduler ranks the cluster's nodes by total pending work plus GPU pressure. It
 emits that node-wide order, pending count, and pressure so the Broker can push the
-snapshot to the matching local proxy (`ollama-proxy`, `lmstudio-proxy`). Before
+snapshot to the matching local `nvpair-proxy` instance. Before
 forwarding, a proxy atomically adds its own not-yet-observed reservations and
 chooses the least-busy capable node; its existing failover walks the remaining
 candidates.
@@ -235,16 +235,32 @@ Notifications:
 The new proxy method the *Broker* calls, carrying the scheduler's order (defined
 proxy-side, §4). The scheduler never calls it — it only emits `schedule:priority`.
 
-- **Params**: `{ nodes: [string], ranks?: [NodeRank] }` — ordered node ids plus
-  their authoritative pending counts and GPU pressure.
+- **Params**: `{ generation: uint64, nodes: [string], ranks?: [NodeRank] }` —
+  a monotonic delivery generation, ordered node ids, and their authoritative
+  pending counts and GPU pressure. The Broker mints `generation` (always ≥ 1);
+  the scheduler does not send it. **Required**: omitted or `0` is rejected with
+  `-32602`, because a snapshot that cleared the proxy's reservations without
+  advancing its applied epoch would let one taken before it release one taken
+  after — the undercount this field exists to prevent.
 - **Semantics** (proxy): for each auto-routed model-bearing inference request,
   atomically choose the minimum authoritative pending count plus GPU pressure
-  plus local reservations, then increment that node's reservation before
-  forwarding.
+  plus local reservations, then reserve that node before forwarding.
   Consider only scheduler-listed nodes in the best available model tier; use
   scheduler order as the tie-break. **Unknown ids are ignored.** A **known node
   not in the list** remains a lowest-priority fallback, and an **empty list**
   reverts to the proxy's default auto heuristic.
+- **Semantics** (proxy, generations): a snapshot is applied **at most once**. A
+  `generation` less than or equal to the newest applied one is ignored whole.
+  Applying a snapshot supersedes the reservations taken against earlier ones, so
+  a redelivery must not clear reservations a second time — and a reservation
+  released after a newer snapshot arrived is dropped rather than decremented,
+  since that snapshot's pending counts already account for the completed work.
+  Without both rules a node's estimated load can fall below zero, which reads as
+  permanently idle and attracts every subsequent dispatch.
+- **Semantics** (proxy, reservations): reservations are **process-wide**, shared
+  by every engine facade in the proxy process — two facades bursting at once
+  compete for the same node's GPU. A reservation is released when its request
+  ends and moved to the node a failover actually lands on.
 - **Result**: the reply shape is defined proxy-side, not here.
 - **Precedence**: a user `node/select` pin overrides the list (§7.3).
 
@@ -292,11 +308,17 @@ consumes the proxy's `workload:*` and routes it to the workload-manager
 (`routeProxyWorkload`); here it consumes `schedule:priority` and routes it to the
 proxies. **Not** a new "originated request" direction. Broker responsibilities
 (implemented in `nvpair-ui-broker`, §15):
-- **Fan-out**: on `schedule:priority`, call `node/set-priority` on the matching
-  supervised proxy; an absent proxy → logged no-op.
-- **Cache + restart-resync**: keep the last complete snapshot per engine and
-  re-push it when a proxy (re)spawns (the Broker owns the proxy lifecycle +
-  `ready`, so it knows when one came back empty).
+- **Fan-out**: on `schedule:priority`, mint a generation and call
+  `node/set-priority` once per **distinct live proxy handle** — every engine
+  resolves to the same process, so a per-engine call would deliver the same
+  snapshot twice. An absent proxy → logged no-op.
+- **Ingestion dedupe**: a snapshot whose ranking matches the cached one is
+  coalesced without minting a generation, so a redundant emission does not
+  cause a redundant delivery.
+- **Cache + restart-resync**: keep the last complete snapshot **process-wide**
+  (the ranking is node-global and not engine-filtered — see §7.2) and re-push it
+  when the proxy (re)spawns, from the supervisor's spawn hook rather than from
+  `ready`, so the replay cannot race the handle's publication.
 - **Feed and seed the streams**: on scheduler spawn, replay active workloads,
   replay cached telemetry, then send discovery so the first non-empty ranking has
   all baselines. Resume live workload, telemetry, and discovery fanout afterward.
@@ -326,7 +348,7 @@ side.
 - **Upstream**: the supervising parent — `nvpair-ui-broker` in practice
   (supervisor-agnostic: any parent that speaks §7.0, feeds the three streams, and
   delivers `schedule:priority` to the proxies).
-- **Downstream (via the Broker)**: `ollama-proxy`/`lmstudio-proxy` (receive
+- **Downstream (via the Broker)**: each `nvpair-proxy` instance (receives
   `node/set-priority`); `nvpair-errors` (receives `errors:*`). No direct link to any.
 - **Data sources (via the Broker)**: `nvpair-workload-manager` + proxies
   (workloads), `nvpair-node-scanner` / manual nodes (discovery and GPU telemetry).
@@ -336,7 +358,8 @@ side.
 ## 9. Data Ownership
 - **Owned**: transient in-memory state only — the accumulated workload catalog,
   discovered-node view, smoothed telemetry state, and last-emitted rank snapshot
-  per engine. Each proxy owns only its short-lived optimistic reservation deltas.
+  per engine. The proxy process owns only its short-lived optimistic reservation
+  deltas, shared across the engine facades it hosts.
 - **Source of truth**: no. Workloads → proxies/WM; discovery and telemetry →
   scanner/manual-nodes; the active routing decision → the proxy; delivery/caching
   → the Broker. The scheduler owns only the policy computation.
@@ -393,11 +416,13 @@ The Broker spawns `nvpair-job-scheduler`, replays active workloads and telemetry
 then sends discovery and resumes all three live streams. Discovery seeds
 `GPU-RIG`, `MY-PC`, `LAB-DESK-B`. Pending counts are `3`, `0`, `1` and GPU
 pressures are `3`, `0`, `1`, so combined loads are `6`, `0`, `2`. The scheduler
-emits `["MY-PC","LAB-DESK-B","GPU-RIG"]` for both engines. The Broker delivers
-each via `node/set-priority`; each proxy applies the subset it can route to.
+emits `["MY-PC","LAB-DESK-B","GPU-RIG"]` for both engines. The ranking is
+node-global, so the Broker coalesces the duplicate and delivers it once per
+distinct proxy process via `node/set-priority`; each facade applies the subset it
+can route to.
 
 As load and smoothed pressure change, only a new pressure band, pending count, or
-order triggers another snapshot. If `ollama-proxy` is not supervised, the Broker
+order triggers another snapshot. If the Ollama proxy is not supervised, the Broker
 drops the push and re-delivers once it is back — the scheduler is unaware.
 
 ## 15. Process model, CLI, and build wiring
@@ -424,10 +449,10 @@ No flag carries node/cluster identity — the scheduler holds none.
   spawned + supervised (auto-restart with crash surfacing);
 - replay active workloads and cached telemetry on scheduler spawn, send the
   discovery baseline, then fan all three live streams to the child;
-- consume its `schedule:priority` and fan out to the proxies via `node/set-priority`,
-  caching the last snapshot per engine and re-pushing on proxy (re)spawn (§7.4) —
-  reuses the proxy `workload:*` → workload-manager routing pattern, not a new
-  direction;
+- consume its `schedule:priority` and fan out via `node/set-priority` to each
+  distinct live proxy handle, caching the last snapshot process-wide and
+  re-pushing on proxy (re)spawn (§7.4) — reuses the proxy `workload:*` →
+  workload-manager routing pattern, not a new direction;
 - forward its `errors:*` to `nvpair-errors`.
 
 **Build wiring**: `nvpair-job-scheduler` is one of the Go binaries in the product

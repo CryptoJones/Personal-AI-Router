@@ -211,10 +211,11 @@ async function applyEnginePort(
 
 /**
  * Set the local Ollama proxy's listen port. Routed through the broker's
- * `proxy:set-port` relay, which persists the port (`proxy-port.json`, restored on
- * restart), live-rebinds the proxy, and **steers it clear of any running engine
- * port** (engines win — a bumped proxy surfaces a sticky `warning` on the errors
- * pipeline). The proxy re-emits `proxy:ready` with the actually-bound port, which
+ * `ollama-proxy:set-port` relay, which persists the port (`proxy-port.json`,
+ * restored on restart), live-rebinds the proxy, and **steers it clear of any
+ * running engine port** (engines win — a bumped proxy surfaces a sticky
+ * `warning` on the errors pipeline). The proxy re-emits `ollama-proxy:ready`
+ * with the actually-bound port, which
  * the bridge already folds into `status.proxyPort`, so success needs no further
  * action here beyond surfacing a failure.
  */
@@ -256,7 +257,7 @@ async function applyProxyPort(proxyEngine: ProxyEngine, port: number): Promise<v
  *    the proxy (the engine's old port is now free for the proxy's target),
  *    persist the engine's new port, then start it back up.
  *
- * Every success path ends in an `engine:set-port` / `doStart` / `proxy:ready`
+ * Every success path ends in an `engine:set-port` / `doStart` / `<engine>-proxy:ready`
  * that re-emits authoritative state, which clears the optimistic op and snaps
  * the UI inputs to backend truth. On failure we clear the optimistic op and
  * report, so the UI reverts to the real ports.

@@ -37,6 +37,14 @@ type ProxyNodeSource = 'ollama-proxy' | 'lmstudio-proxy'
 type BrokerNodeSource = ProxyNodeSource | 'broker'
 
 /**
+ * The engine proxies, by the one name that identifies each of them everywhere:
+ * the broker's relay prefix, the errors-pipeline source, and the node source
+ * recorded here. That is `ComponentName` in `services/shared/engines`, always
+ * `<engine>-proxy`.
+ */
+export const PROXY_NODE_SOURCES: readonly ProxyNodeSource[] = ['ollama-proxy', 'lmstudio-proxy']
+
+/**
  * Engines surfaced by the broker's proxy plane. Other engine-manager engines
  * are not currently routed across nodes.
  */
@@ -328,7 +336,7 @@ export function parseServiceErrors(value: JsonValue | undefined): ServiceError[]
  * Per-node proxy "upstream unreachable" warnings duplicate the node list's
  * offline group, so they are never surfaced in the error UI. Backend id shape:
  * `<engine>-proxy:upstream-unreachable:<nodeId>`
- * (services/ollama-proxy/proxy.go `upstreamUnreachableID`).
+ * (services/nvpair-proxy/proxy.go `upstreamUnreachableID`).
  */
 export function isUpstreamUnreachableError(error: ServiceError): boolean {
     return error.id.includes(':upstream-unreachable:')
@@ -2279,7 +2287,7 @@ class ModularBridgeState {
     }
 
     handleNotification(notification: JsonRpcNotification): void {
-        if (notification.source === 'proxy') {
+        if (notification.source === 'ollama-proxy') {
             this.handleProxyNotification(notification, 'ollama')
             return
         }

@@ -16,8 +16,6 @@
 - none ✅
 
 ### Requests the backend handles but the bridge never calls (unused capability)
-- ⚠️ lmstudio-proxy → node/selected
-- ⚠️ lmstudio-proxy → node/set-local-backend
 - ⚠️ nvpair-engine-manager → engine:describe
 - ⚠️ nvpair-engine-manager → engine:errors
 - ⚠️ nvpair-engine-manager → engine:logs
@@ -32,43 +30,22 @@
 - ⚠️ nvpair-node-settings → settings/get-force-ports
 - ⚠️ nvpair-node-settings → settings/set-cluster-auto-sync
 - ⚠️ nvpair-node-settings → settings/set-force-ports
+- ⚠️ nvpair-proxy → facade/enable
+- ⚠️ nvpair-proxy → node/selected
+- ⚠️ nvpair-proxy → node/set-local-backend
 - ⚠️ nvpair-ui-broker → discovery:unsubscribe
 - ⚠️ nvpair-ui-broker → engine:set-reserved-port
 - ⚠️ nvpair-ui-broker → engine:unsubscribe
 - ⚠️ nvpair-ui-broker → internal:set-reserved-port
-- ⚠️ nvpair-ui-broker → proxy:get-status
-- ⚠️ nvpair-ui-broker → proxy:unsubscribe
+- ⚠️ nvpair-ui-broker → lmstudio-proxy:get-status
+- ⚠️ nvpair-ui-broker → lmstudio-proxy:set-port
+- ⚠️ nvpair-ui-broker → lmstudio-proxy:unsubscribe
+- ⚠️ nvpair-ui-broker → ollama-proxy:get-status
+- ⚠️ nvpair-ui-broker → ollama-proxy:unsubscribe
 - ⚠️ nvpair-ui-broker → workloads:unsubscribe
-- ⚠️ ollama-proxy → node/selected
-- ⚠️ ollama-proxy → node/set-local-backend
 
 ### Backend binaries not listed in `modular-binaries.ts`
 - none ✅
-
-## lmstudio-proxy
-
-| Method | Direction | In bridge? |
-|---|---|---|
-| `error` | notification (we consume) | ✅ yes |
-| `errors:clear` | notification (we consume) | ✅ yes |
-| `errors:report` | notification (we consume) | ✅ yes |
-| `node/discovered` | notification (we consume) | ✅ yes |
-| `node/removed` | notification (we consume) | ✅ yes |
-| `node/selection-changed` | notification (we consume) | ➖ ignored |
-| `node/updated` | notification (we consume) | ✅ yes |
-| `proxy/request` | notification (we consume) | ✅ yes |
-| `proxy/request-started` | notification (we consume) | ➖ ignored |
-| `ready` | notification (we consume) | ✅ yes |
-| `node/add-manual` | request (we call) | ✅ yes |
-| `node/remove-manual` | request (we call) | ✅ yes |
-| `node/select` | request (we call) | ✅ yes |
-| `node/selected` | request (we call) | ⚠️ not called |
-| `node/set-local-backend` | request (we call) | ⚠️ not called |
-| `node/set-priority` | request (we call) | ✅ yes |
-| `nodes/list` | request (we call) | ✅ yes |
-
-**Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
-- `method (var)  (proxy.go)`
 
 ## nvpair-cluster-manager
 
@@ -203,6 +180,32 @@
 | `settings/set-cluster-id` | request (we call) | ✅ yes |
 | `settings/set-force-ports` | request (we call) | ⚠️ not called |
 
+## nvpair-proxy
+
+| Method | Direction | In bridge? |
+|---|---|---|
+| `error` | notification (we consume) | ✅ yes |
+| `errors:clear` | notification (we consume) | ✅ yes |
+| `errors:report` | notification (we consume) | ✅ yes |
+| `node/discovered` | notification (we consume) | ✅ yes |
+| `node/removed` | notification (we consume) | ✅ yes |
+| `node/selection-changed` | notification (we consume) | ➖ ignored |
+| `node/updated` | notification (we consume) | ✅ yes |
+| `proxy/request` | notification (we consume) | ✅ yes |
+| `proxy/request-started` | notification (we consume) | ➖ ignored |
+| `ready` | notification (we consume) | ✅ yes |
+| `facade/enable` | request (we call) | ⚠️ not called |
+| `node/add-manual` | request (we call) | ✅ yes |
+| `node/remove-manual` | request (we call) | ✅ yes |
+| `node/select` | request (we call) | ✅ yes |
+| `node/selected` | request (we call) | ⚠️ not called |
+| `node/set-local-backend` | request (we call) | ⚠️ not called |
+| `node/set-priority` | request (we call) | ✅ yes |
+| `nodes/list` | request (we call) | ✅ yes |
+
+**Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
+- `method (var)  (proxy.go)`
+
 ## nvpair-tui
 
 | Method | Direction | In bridge? |
@@ -227,7 +230,8 @@
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `errors:update` | notification (we consume) | ✅ yes |
-| `proxy:ready` | notification (we consume) | ✅ yes |
+| `lmstudio-proxy:ready` | notification (we consume) | ➖ ignored |
+| `ollama-proxy:ready` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
 | `connection/cluster-auto-sync` | request (we call) | ➖ ignored |
 | `connection/cluster-identity` | request (we call) | ✅ yes |
@@ -242,16 +246,20 @@
 | `engine:unsubscribe` | request (we call) | ⚠️ not called |
 | `errors:get-initial` | request (we call) | ✅ yes |
 | `internal:set-reserved-port` | request (we call) | ⚠️ not called |
+| `lmstudio-proxy:get-status` | request (we call) | ⚠️ not called |
+| `lmstudio-proxy:set-port` | request (we call) | ⚠️ not called |
+| `lmstudio-proxy:subscribe` | request (we call) | ✅ yes |
+| `lmstudio-proxy:unsubscribe` | request (we call) | ⚠️ not called |
 | `node/add` | request (we call) | ✅ yes |
 | `node/discovered` | request (we call) | ✅ yes |
 | `node/remove` | request (we call) | ✅ yes |
 | `node/removed` | request (we call) | ✅ yes |
 | `node/updated` | request (we call) | ✅ yes |
 | `nodes/list` | request (we call) | ✅ yes |
-| `proxy:get-status` | request (we call) | ⚠️ not called |
-| `proxy:set-port` | request (we call) | ✅ yes |
-| `proxy:subscribe` | request (we call) | ✅ yes |
-| `proxy:unsubscribe` | request (we call) | ⚠️ not called |
+| `ollama-proxy:get-status` | request (we call) | ⚠️ not called |
+| `ollama-proxy:set-port` | request (we call) | ✅ yes |
+| `ollama-proxy:subscribe` | request (we call) | ✅ yes |
+| `ollama-proxy:unsubscribe` | request (we call) | ⚠️ not called |
 | `ready` | request (we call) | ✅ yes |
 | `workloads:get-initial` | request (we call) | ✅ yes |
 | `workloads:remove` | request (we call) | ✅ yes |
@@ -260,11 +268,9 @@
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
 - `method (var)  (broker.go, 5 sites)`
-- `proxy:*  (broker.go)`
 - `method (var)  (clustermanager.go)`
 - `method (var)  (errors.go)`
-- `lmstudio-proxy:*  (lmstudioproxy.go)`
-- `method (var)  (proxy.go)`
+- `method (var)  (proxy.go, 2 sites)`
 - `method (var)  (rpcworker.go, 2 sites)`
 
 ## nvpair-workload-manager
@@ -274,29 +280,4 @@
 | `ready` | notification (we consume) | ✅ yes |
 | `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
-
-## ollama-proxy
-
-| Method | Direction | In bridge? |
-|---|---|---|
-| `error` | notification (we consume) | ✅ yes |
-| `errors:clear` | notification (we consume) | ✅ yes |
-| `errors:report` | notification (we consume) | ✅ yes |
-| `node/discovered` | notification (we consume) | ✅ yes |
-| `node/removed` | notification (we consume) | ✅ yes |
-| `node/selection-changed` | notification (we consume) | ➖ ignored |
-| `node/updated` | notification (we consume) | ✅ yes |
-| `proxy/request` | notification (we consume) | ✅ yes |
-| `proxy/request-started` | notification (we consume) | ➖ ignored |
-| `ready` | notification (we consume) | ✅ yes |
-| `node/add-manual` | request (we call) | ✅ yes |
-| `node/remove-manual` | request (we call) | ✅ yes |
-| `node/select` | request (we call) | ✅ yes |
-| `node/selected` | request (we call) | ⚠️ not called |
-| `node/set-local-backend` | request (we call) | ⚠️ not called |
-| `node/set-priority` | request (we call) | ✅ yes |
-| `nodes/list` | request (we call) | ✅ yes |
-
-**Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
-- `method (var)  (proxy.go)`
 

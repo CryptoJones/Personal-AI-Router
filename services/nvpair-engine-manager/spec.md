@@ -18,7 +18,7 @@ A declarative, config-driven control plane for **local inference engines** (Olla
 - Expose all of the above over the `engine:*` JSON-RPC surface to whatever orchestrates the service, plus an optional plain-HTTP LAN endpoint (`--http-port`, `GET /v1/models`) that serves the model list to a peer's discovery daemon (the list moved off the size-limited mDNS TXT onto HTTP).
 
 **Out of scope**
-- **Inference traffic** — stays with `ollama-proxy`; this service never proxies `/api/chat` etc.
+- **Inference traffic** — stays with `nvpair-proxy`; this service never proxies `/api/chat` etc.
 - **Multi-instance per engine and an MCP server** — future-additive, not v1.
 - **The node's error list** — owned by `nvpair-errors`, which holds it as in-memory session state; this service only emits `errors:report` / `errors:clear`.
 

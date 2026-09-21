@@ -39,8 +39,8 @@ history.
 
 `nvpair-ui-broker` is the sole Electron child. It owns:
 
-- `ollama-proxy`;
-- `lmstudio-proxy`;
+- `nvpair-proxy`, one process hosting a facade per enabled engine, under one
+  supervisor;
 - `nvpair-node-scanner`;
 - `nvpair-node-info`;
 - `nvpair-manual-nodes`;
@@ -99,10 +99,16 @@ they survive worker restarts.
 
 ## Routing and inference
 
-Both text-engine proxies are broker-owned and cluster-aware:
+Both text-engine facades are broker-owned and cluster-aware. They live in one
+`nvpair-proxy` process, each enabled after spawn on its own port, and each
+serves its engine's dialect:
 
-- `ollama-proxy` serves the Ollama-compatible surface;
-- `lmstudio-proxy` serves the LM Studio/OpenAI-compatible surface.
+- the Ollama facade serves the Ollama-compatible surface;
+- the LM Studio facade serves the LM Studio/OpenAI-compatible surface.
+
+Sharing a process is what lets them share the burst reservations the scheduler
+depends on: two facades bursting at once compete for the same node's GPU, so a
+dispatch through either has to be visible to the other.
 
 Routing precedence is manual selection, scheduler priority, then deterministic
 proxy ordering. Personal AI Router leaves proxies in automatic mode.

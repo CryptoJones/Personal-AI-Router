@@ -9,10 +9,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Proxy and Inference Routing
 
-Routing is owned by `ollama-proxy`, `lmstudio-proxy`,
+Routing is owned by `nvpair-proxy` (one process hosting a facade per engine,
+addressed by clients as `ollama-proxy:` / `lmstudio-proxy:`),
 `nvpair-job-scheduler`, and `nvpair-ui-broker`.
 
-For model-bearing inference, each proxy first filters a request-local discovery
+For model-bearing inference, each facade first filters a request-local discovery
 snapshot to nodes whose per-engine inventory advertises the requested model.
 Empty and non-matching inventories are ineligible; an empty owner set returns a
 local `502` without contacting an engine. Ollama normalizes the implicit
@@ -37,8 +38,16 @@ The scheduler smooths fresh utilization into pressure 0–3, treats invalid,
 missing, or older-than-10-second telemetry as neutral pressure 1, and ranks by
 `pending + gpuPressure`, then pressure, then stable UUID. It emits
 `schedule:priority` snapshots containing order, pending counts, and pressure.
-Each proxy chooses with `pending + gpuPressure + localReservations`, so
+Each facade chooses with `pending + gpuPressure + localReservations`, so
 concurrent bursts do not wait for workload feedback.
+
+Those reservations are **process-wide, shared by every facade**. Two facades
+bursting at once compete for the same node's GPU, so a dispatch through either
+must be visible to the other; this is the reason the engines share one process.
+A reservation is stamped with the snapshot generation it was counted against,
+released when its request ends, and moved to the node a failover actually
+lands on. A snapshot supersedes the reservations taken before it, so a release
+arriving after one is ignored rather than double-counted.
 
 ## PAIR responsibilities
 

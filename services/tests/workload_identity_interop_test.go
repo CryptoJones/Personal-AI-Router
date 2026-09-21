@@ -66,8 +66,8 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 	lmstudioPort := portOfURL(t, lmstudio.URL)
 
 	stdin, msgs, _, cleanup := startBrokerWith(t,
+		// Both engines fronted, which is the default.
 		"--proxy-path", proxyBin,
-		"--lmstudio-proxy-path", lmstudioProxyBin,
 		"--workload-manager-path", workloadMgrBin,
 	)
 	t.Cleanup(cleanup)
@@ -89,9 +89,9 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 	// Pin each fake engine into its proxy so inference routes deterministically.
 	// These are stdio control notifications, not HTTP hits on the proxy port,
 	// so the first HTTP request each proxy serves is the inference below → id "1".
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["crossengine-model"]}}`, ollamaPort))
+	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["crossengine-model"]}}`, ollamaPort))
 	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"proxy:node/select","params":{"id":"fake-ollama"}}`)
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":"fake-ollama"}}`)
 	waitForResponse(t, msgs, 5*time.Second)
 	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":52,"method":"lmstudio-proxy:node/add-manual","params":{"id":"fake-lmstudio","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["crossengine-model"]}}`, lmstudioPort))
 	waitForResponse(t, msgs, 5*time.Second)
@@ -192,7 +192,7 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 	received := fx.startStubClusterPeer(t, "rehydrate-wm-peer", "rehydrate-peer-uuid")
 
 	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, t.TempDir(), fx.nodeDir,
-		"--proxy-path", proxyBin,
+		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--workload-manager-path", workloadMgrBin,
 	)
 	t.Cleanup(cleanup)
@@ -223,9 +223,9 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 
 	// Pin the fake ollama, then fire one inference in the background — the
 	// backend blocks, so the workload stays running until teardown.
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-model"]}}`, ollamaPort))
+	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-model"]}}`, ollamaPort))
 	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"proxy:node/select","params":{"id":"fake-ollama"}}`)
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":"fake-ollama"}}`)
 	waitForResponse(t, msgs, 5*time.Second)
 	go func() {
 		c := &http.Client{Timeout: 120 * time.Second}
@@ -293,7 +293,7 @@ func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
 	received := fx.startStubClusterPeer(t, "rehydrate-term-peer", "rehydrate-term-peer-uuid")
 
 	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, t.TempDir(), fx.nodeDir,
-		"--proxy-path", proxyBin,
+		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--workload-manager-path", workloadMgrBin,
 	)
 	t.Cleanup(cleanup)
@@ -316,9 +316,9 @@ func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
 	proxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
 	pid1 := awaitInt(t, wmPids, 10*time.Second, "initial workload-manager start")
 
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-term-model"]}}`, ollamaPort))
+	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-term-model"]}}`, ollamaPort))
 	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"proxy:node/select","params":{"id":"fake-ollama"}}`)
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":"fake-ollama"}}`)
 	waitForResponse(t, msgs, 5*time.Second)
 
 	// Fire one inference; it completes promptly → terminal workload.
@@ -359,39 +359,6 @@ func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
 // --- helpers ---
 
 var wmStartedPidRe = regexp.MustCompile(`workload-manager started.*\bpid=(\d+)`)
-
-// waitLMStudioProxyReady polls lmstudio-proxy:get-status until the LM Studio
-// proxy reports ready and returns its bound port (mirrors waitProxyReady).
-func waitLMStudioProxyReady(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, timeout time.Duration) int {
-	t.Helper()
-	id := 9500
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"lmstudio-proxy:get-status"}`, id))
-	deadline := time.After(timeout)
-	tick := time.NewTicker(500 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case msg, ok := <-msgs:
-			if !ok {
-				t.Fatal("broker stream closed waiting for lmstudio-proxy:get-status")
-			}
-			if msg.ID != nil && msg.Method == "" {
-				var st struct {
-					Ready bool `json:"ready"`
-					Port  int  `json:"port"`
-				}
-				if json.Unmarshal(msg.Result, &st) == nil && st.Ready {
-					return st.Port
-				}
-			}
-		case <-tick.C:
-			id++
-			writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"lmstudio-proxy:get-status"}`, id))
-		case <-deadline:
-			t.Fatalf("timed out (%s) waiting for lmstudio-proxy to become ready", timeout)
-		}
-	}
-}
 
 // waitStubPeerWorkload blocks until the stub peer records a workload:* frame
 // for the given model in the given state.

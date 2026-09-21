@@ -42,8 +42,7 @@ The canonical runtime inventory is
 | Binary                    | Owner            | Purpose                                     |
 | ------------------------- | ---------------- | ------------------------------------------- |
 | `nvpair-ui-broker`        | Electron         | Worker supervision and control-plane relay  |
-| `ollama-proxy`            | Broker           | Ollama-compatible proxy and cluster routing |
-| `lmstudio-proxy`          | Broker, optional | LM Studio OpenAI-compatible proxy           |
+| `nvpair-proxy`            | Broker           | Engine proxy and cluster routing; one process hosting a facade per enabled engine |
 | `nvpair-node-scanner`     | Broker           | LAN discovery and announcement              |
 | `nvpair-node-info`        | Broker           | Node metadata and telemetry endpoint        |
 | `nvpair-workload-manager` | Broker, optional | Workload replication                        |

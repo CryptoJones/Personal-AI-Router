@@ -21,8 +21,7 @@ broker supervises every worker and relays its control plane.
 | Binary                    | Runtime role                                              |
 | ------------------------- | --------------------------------------------------------- |
 | `nvpair-ui-broker`        | Worker supervision and relay                              |
-| `ollama-proxy`            | Ollama-compatible routing proxy with cluster-mTLS ingress |
-| `lmstudio-proxy`          | LM Studio routing proxy with cluster-mTLS ingress         |
+| `nvpair-proxy`            | Engine routing proxy with cluster-mTLS ingress; one process hosting a facade per enabled engine |
 | `nvpair-node-scanner`     | Discovery and node announcement                           |
 | `nvpair-node-info`        | Node metadata and telemetry                               |
 | `nvpair-manual-nodes`     | User-managed node entries                                 |
@@ -45,7 +44,7 @@ flowchart TB
     Broker["nvpair-ui-broker"]
     Scanner["nvpair-node-scanner"]
     NodeInfo["nvpair-node-info"]
-    Proxies["ollama-proxy / lmstudio-proxy"]
+    Proxies["nvpair-proxy (one process, a facade per engine)"]
     Engines["nvpair-engine-manager"]
     Cluster["nvpair-cluster-manager"]
     Settings["nvpair-node-settings"]
@@ -117,7 +116,7 @@ reserved for inference clients.
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | `app:ready`                                          | Complete broker startup and refresh snapshots                                                                                   | `state:request-refresh`                                   |
 | `discovery:nodes-changed`                            | Replace discovery snapshot and diff nodes                                                                                       | `discovery:nodes-changed`, `nodes:upsert`, `nodes:remove` |
-| `proxy:ready` / `lmstudio-proxy:ready`               | Record engine proxy port                                                                                                        | `engines:state-changed`                                   |
+| `ollama-proxy:ready` / `lmstudio-proxy:ready`        | Record engine proxy port                                                                                                        | `engines:state-changed`                                   |
 | proxy `node/*`                                       | Update per-engine node presence; the advertised port is the peer's promoted proxy port (not the engine's private loopback port) | node and engine pushes                                    |
 | `engine:ready` / `engine:state-changed`              | Update engine facts and models                                                                                                  | `engines:state-changed`                                   |
 | `engine:install-progress` / `engine:remote-progress` | Update operation progress                                                                                                       | engine progress pushes                                    |
@@ -262,8 +261,8 @@ resolved back to the hostname the entry was keyed by.
 ### Secure inference (backend-owned)
 
 An NVPAIR-launched engine binds to loopback only and is never directly
-LAN-reachable. Each node fronts its engine with its `ollama-proxy` /
-`lmstudio-proxy`, whose LAN ingress is gated by cluster mTLS: only a pinned
+LAN-reachable. Each node fronts all of its engines with one `nvpair-proxy`
+process, and every facade's LAN ingress is gated by cluster mTLS: only a pinned
 cluster member can send it work. Discovery advertises the promoted **proxy**
 port (never the engine port), and the broker hands the private loopback engine to
 the local proxy via `node/set-local-backend`. Every cluster-scoped worker derives

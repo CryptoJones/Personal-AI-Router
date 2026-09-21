@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// The proxy port is never assumed: the broker owns ollama-proxy and reports its
-// bound listener via `proxy:ready` / `proxy:get-status`. Until it does, the
-// proxy port is unknown (surfaced as null) — we do not fabricate a default,
-// since a wrong port misleads the user and can route requests to the wrong
-// place.
+// The proxy port is never assumed: the broker owns the engine proxies and
+// reports each bound listener via that engine's `<engine>-proxy:ready` /
+// `<engine>-proxy:get-status` pair. Until it does, the proxy port is unknown
+// (surfaced as null) — we do not fabricate a default, since a wrong port
+// misleads the user and can route requests to the wrong place.
 
 // nvpair-cluster-manager pairing (EAP-NOOB) HTTP port. `cluster:invite-node` and
 // the PIN handshake are driven against this port. Hardcoded pending backend
