@@ -587,7 +587,7 @@ From here every trusted inter-node call between A and B is mutually authenticate
 No flag carries the node identity (self-generated, §7.4) or the cluster identity (`cluster:set-identity`, §7.0), keeping the binary self-bootstrapping under any supervisor.
 
 **Build wiring**: `nvpair-cluster-manager` is one of the Go binaries in the product bundle. Adding it requires, in the same change:
-- a `components.nvpair-cluster-manager` entry in `versions.json`, an `installer` bump, and a `product` bump (see `VERSIONING.md`);
+- a `components.nvpair-cluster-manager` entry in `versions.json` and a `services` bump, both declared in the pull request's release-intent block rather than edited by hand (see `VERSIONING.md`);
 - a build + copy step in **both** `build.bat` and `build.sh` (→ the repo-root `build/bin/` bundle), with the `-X main.Version=…` ldflag;
 - inclusion in the NSIS installer (`installer/nvpair-setup.nsi`) and any firewall-rule list (it opens TCP `14321`), plus `bom.md`;
 - a `product` bump declared in the pull request's release-intent block (see `VERSIONING.md`).
