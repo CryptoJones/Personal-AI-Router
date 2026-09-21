@@ -87,32 +87,15 @@ func nodeForModel(t *testing.T, id, serverURL, model string) Node {
 	return node
 }
 
-// TestHandlePlain_OptionsPreflight: a CORS preflight is answered locally with
-// 204 + permissive headers and never forwarded.
-func TestHandlePlain_OptionsPreflight(t *testing.T) {
+// Preflight cannot authorize a browser when no engine is reachable.
+func TestHandlePlain_PreflightWithoutEngineFails(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
+		req := corsRequest(http.MethodOptions, tc.inferencePath, "http://app.test")
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodOptions, tc.inferencePath, nil)
-		req.RemoteAddr = "127.0.0.1:40000"
-		req.Header.Set("Access-Control-Request-Headers", "X-Custom-Token")
 		p.soleFacade().handlePlain(rec, req)
-
-		if rec.Code != http.StatusNoContent {
-			t.Fatalf("status = %d, want 204", rec.Code)
-		}
-		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-			t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
-		}
-		if rec.Header().Get("Access-Control-Allow-Methods") == "" {
-			t.Errorf("missing Access-Control-Allow-Methods")
-		}
-		if got := rec.Header().Get("Access-Control-Expose-Headers"); got != "*" {
-			t.Errorf("Access-Control-Expose-Headers = %q, want *", got)
-		}
-		// The browser's requested headers are echoed so an arbitrary header clears preflight.
-		if got := rec.Header().Get("Access-Control-Allow-Headers"); got != "X-Custom-Token" {
-			t.Errorf("Access-Control-Allow-Headers = %q, want echoed X-Custom-Token", got)
+		if rec.Code != http.StatusBadGateway || rec.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Fatalf("status=%d headers=%v", rec.Code, rec.Header())
 		}
 	})
 }
@@ -194,12 +177,8 @@ func TestHandleHTTP_EngineCORSPolicyPreserved(t *testing.T) {
 	})
 }
 
-// TestHandleHTTP_EngineCredentialsWithoutOriginDropped: an engine (or an
-// intermediary in front of it) that sends Allow-Credentials but no origin has
-// declared no policy to keep, so the proxy supplies its own. The wildcard it
-// writes is invalid next to Allow-Credentials: true, and a browser rejects that
-// pair, so the inherited header must not survive the forward.
-func TestHandleHTTP_EngineCredentialsWithoutOriginDropped(t *testing.T) {
+// Preserve incomplete upstream policy without adding permissions.
+func TestHandleHTTP_EngineCredentialsWithoutOriginPreserved(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -215,17 +194,17 @@ func TestHandleHTTP_EngineCredentialsWithoutOriginDropped(t *testing.T) {
 		rec := httptest.NewRecorder()
 		p.soleFacade().handleHTTP(rec, tc.inferenceRequest())
 
-		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-			t.Errorf("Access-Control-Allow-Origin = %q, want the proxy's wildcard", got)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header", got)
 		}
-		if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "" {
-			t.Errorf("Access-Control-Allow-Credentials = %q, want cleared alongside the wildcard origin", got)
+		if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+			t.Errorf("Access-Control-Allow-Credentials = %q, want upstream value preserved", got)
 		}
 	})
 }
 
 // TestHandleHTTP_HappyPathSingleNode: the common case — one healthy node
-// answers directly, body forwarded, CORS present on the success response.
+// answers directly, preserving the body and absence of CORS permissions.
 func TestHandleHTTP_HappyPathSingleNode(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		var gotBody string
@@ -250,8 +229,8 @@ func TestHandleHTTP_HappyPathSingleNode(t *testing.T) {
 		if gotBody != tc.inferenceBody() {
 			t.Errorf("node got body %q, want the original request body", gotBody)
 		}
-		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-			t.Errorf("Access-Control-Allow-Origin = %q, want * on success", got)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header on success", got)
 		}
 	})
 }
@@ -290,9 +269,8 @@ func TestHandleHTTP_NoRetryOn400(t *testing.T) {
 	})
 }
 
-// TestHandleHTTP_RejectionHasCORS: even the no-node rejection carries CORS so a
-// browser sees the real 502 instead of an opaque CORS error.
-func TestHandleHTTP_RejectionHasCORS(t *testing.T) {
+// Proxy-generated errors grant no cross-origin access.
+func TestHandleHTTP_RejectionHasNoCORS(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
 		rec := httptest.NewRecorder()
@@ -301,8 +279,8 @@ func TestHandleHTTP_RejectionHasCORS(t *testing.T) {
 		if rec.Code != http.StatusBadGateway {
 			t.Fatalf("status = %d, want 502", rec.Code)
 		}
-		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-			t.Errorf("Access-Control-Allow-Origin = %q, want * on rejection", got)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header on rejection", got)
 		}
 	})
 }
@@ -341,14 +319,14 @@ func TestHandleHTTP_FailoverOn503(t *testing.T) {
 		if gotBody != tc.inferenceBody() {
 			t.Errorf("failover node got body %q, want the original request body", gotBody)
 		}
-		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-			t.Errorf("Access-Control-Allow-Origin = %q, want * on proxied success", got)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header on proxied success", got)
 		}
 	})
 }
 
 // TestHandleHTTP_AllNodesDownReturnsError: when every candidate fails at the
-// transport, the client gets one clean 502 (not a hang), still with CORS.
+// transport, the client gets a 502 without added CORS permissions.
 func TestHandleHTTP_AllNodesDownReturnsError(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		// Two servers we immediately close so dials fail.
@@ -370,8 +348,8 @@ func TestHandleHTTP_AllNodesDownReturnsError(t *testing.T) {
 		if rec.Code != http.StatusBadGateway {
 			t.Fatalf("status = %d, want 502 when all nodes are down", rec.Code)
 		}
-		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-			t.Errorf("Access-Control-Allow-Origin = %q, want * on exhausted error", got)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header on exhausted error", got)
 		}
 	})
 }
@@ -500,8 +478,8 @@ func TestHandleHTTP_AggregatesNativeModelList(t *testing.T) {
 	if got.Models[1].Digest != "first" {
 		t.Errorf("duplicate metadata = %q, want deterministic first candidate", got.Models[1].Digest)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header", got)
 	}
 	// Addressed to the engine, like every facade-scoped notification: the
 	// broker's process-scoped router claims only workload and node-activity

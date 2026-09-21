@@ -151,3 +151,41 @@ func TestSetPortRebinds(t *testing.T) {
 		}
 	})
 }
+
+// Persistence failure must leave the old listener serving and the new port free.
+func TestSetPortPersistenceFailurePreservesListener(t *testing.T) {
+	forEachEngine(t, func(t *testing.T, tc engineCase) {
+		redirectConfigDir(t)
+		portA := freeTCPPort(t)
+		proxy := newTestProxy(tc.profile, NewCodec(&bytes.Buffer{}), NewDiscovery(), portA)
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", portA))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		proxy.soleFacade().serveHTTP(ctx, ln)
+		defer proxy.shutdown(context.Background())
+		path, err := proxyPortPath(tc.profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		portB := freeTCPPort(t)
+		if err := proxy.soleFacade().setPort(portB); err == nil {
+			t.Fatal("persistence failure reported success")
+		}
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", portA), time.Second)
+		if err != nil {
+			t.Fatal("old listener lost", err)
+		}
+		_ = conn.Close()
+		next, err := net.Listen("tcp", fmt.Sprintf(":%d", portB))
+		if err != nil {
+			t.Fatal("failed candidate listener leaked", err)
+		}
+		_ = next.Close()
+	})
+}

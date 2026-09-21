@@ -107,6 +107,10 @@ type engineProxyRuntime struct {
 	// managedFacade reports that the broker is holding this engine's facade
 	// port for its proxy.
 	managedFacade atomic.Bool
+	// explicitSettings keeps automatic bind recovery from overriding a saved
+	// user choice. The reader must inspect this without taking engineConfigMu,
+	// which a settings operation may hold while waiting for the same reader.
+	explicitSettings atomic.Bool
 
 	// backendPort is engine-manager's configured port for the engine itself,
 	// as last observed. Zero means not yet known, which several paths treat
@@ -248,7 +252,8 @@ func (b *Broker) enableProxyFacade(parent context.Context, p *proxyProcess, spec
 }
 
 // enableProxyFacadeWithFallback enables a facade, retrying once on a fallback
-// port if the first attempt lost a bind race.
+// port if the first attempt lost a bind race. An explicit settings choice is
+// never moved automatically; its failure is surfaced to the caller.
 //
 // Retrying in-process is the point of moving bring-up off argv. A bind failure
 // used to end the child so the supervisor could respawn it on a corrected port,
@@ -264,6 +269,9 @@ func (b *Broker) enableProxyFacadeWithFallback(
 ) error {
 	err := b.enableProxyFacade(parent, p, spec)
 	if err == nil || !stderrors.Is(err, errFacadeBindFailed) {
+		return err
+	}
+	if profile, ok := engineProxyProfileFor(spec.Engine); ok && b.engineProxy(profile).explicitSettings.Load() {
 		return err
 	}
 	// Teardown began between the attempt and the retry: stop here rather than
@@ -398,13 +406,6 @@ func (p engineProxyProfile) addressed(method string) string {
 	return engines.AddressMethod(p.Name, method)
 }
 
-// portBumpedID is the sticky warning surfaced when the broker moves this
-// engine's proxy off a port a running engine holds. Sticky (no timestamp
-// suffix) so repeated bumps upsert one entry.
-func (p engineProxyProfile) portBumpedID() string {
-	return p.ComponentName() + ":port-bumped"
-}
-
 // ownershipBlockedID matches the per-engine constants; see
 // TestBrokerConstantsMatchTheEngineTable.
 func (p engineProxyProfile) ownershipBlockedID() string {
@@ -428,12 +429,6 @@ func (b *Broker) reportProxyUnavailable(p engineProxyProfile, reason string) {
 		Severity:  "warning",
 		Action:    "none",
 	})
-}
-
-// managedFacade reports whether the broker currently holds this engine's
-// facade port for its proxy.
-func (b *Broker) managedFacade(p engineProxyProfile) bool {
-	return b.engineProxy(p).managedFacade.Load()
 }
 
 // engineProxyHandle returns the live proxy process for an engine, or nil.

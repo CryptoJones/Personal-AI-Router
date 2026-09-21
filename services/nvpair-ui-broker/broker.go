@@ -147,22 +147,36 @@ type ProxyStatusResult struct {
 // client connection in listen mode so future per-session caches (auth
 // tokens, watched-resource cursors, etc.) don't bleed across clients.
 type Broker struct {
-	codec           *Codec
-	cancel          context.CancelFunc
-	startedAt       time.Time
-	nodeID          string
-	scannerPath     string
-	nodeInfoPath    string
-	proxyPath       string
-	proxyEngines    []string
-	workloadMgrPath string
-	errorsPath      string
-	engineMgrPath   string
-	manualNodesPath string
-	settingsPath    string
-	clusterMgrPath  string
-	schedulerPath   string
-	clusterDir      string
+	// settingsApplyMu serializes engine settings applies end to end, including
+	// the engine stop and restart. engineConfigMu guards only the journal and
+	// is released while an engine restarts, so this is what keeps two applies —
+	// which may compete for the same port — from interleaving. Always take it
+	// before engineConfigMu, never the reverse.
+	settingsApplyMu      sync.Mutex
+	engineConfigMu       sync.Mutex
+	engineSettingsLoaded bool
+	engineSettingsError  error
+	engineSettingsEpoch  string
+	engineSettings       map[string]*engineSettingsRecord
+	settingsRelayMu      sync.Mutex
+	settingsCancels      map[string]context.CancelFunc
+	activeSettings       map[string]activeSettingsOperation
+	codec                *Codec
+	cancel               context.CancelFunc
+	startedAt            time.Time
+	nodeID               string
+	scannerPath          string
+	nodeInfoPath         string
+	proxyPath            string
+	proxyEngines         []string
+	workloadMgrPath      string
+	errorsPath           string
+	engineMgrPath        string
+	manualNodesPath      string
+	settingsPath         string
+	clusterMgrPath       string
+	schedulerPath        string
+	clusterDir           string
 	// Managed-port state is prepared before proxy startup and read by the proxy
 	// supervisor/reader goroutines. Ollama commits its pending backend move after
 	// its proxy reserves :11434; LM Studio moves through engine-manager first,
@@ -505,6 +519,9 @@ func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
 	if w == nil {
 		return
 	}
+	// An unreadable journal must not discard the component stores' enabled
+	// intent. Recovery logs the failure; restore still uses the saved runtime.
+	b.recoverEngineSettings()
 	if err := w.Notify(restoreEnabledEnginesMethod, nil); err != nil {
 		slog.Warn("failed to request enabled-engine restoration", "err", err)
 	}
@@ -1447,11 +1464,36 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 // pipeline; the rest of each worker's notification stream is logged and
 // dropped until its control-plane relay is wired in.
 func (b *Broker) forwardEngineNotification(method string, params json.RawMessage) {
+	if method == "engine:settings-request" {
+		b.handleSettingsRelay(params)
+		return
+	}
+	if method == "engine:settings-cancel" {
+		var p struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(params, &p) == nil {
+			b.settingsRelayMu.Lock()
+			cancel := b.settingsCancels[p.ID]
+			b.settingsRelayMu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+		}
+		return
+	}
 	if b.dispatchErrorsNotif("engine-manager", method, params) {
 		return
 	}
 	if method == "engine:ready" {
 		b.reconcileLMStudioProxyAfterEngineManagerReady()
+		go func() {
+			b.engineConfigMu.Lock()
+			defer b.engineConfigMu.Unlock()
+			if b.engineSettingsLoaded && b.engineSettingsError == nil && len(b.engineSettings) > 0 {
+				b.publishSettingsLocked()
+			}
+		}()
 	}
 	if method == noderec.MethodSubscribe {
 		// engine-manager subscribes upward for its ec peer set (nodes exposing
@@ -2030,6 +2072,7 @@ func (b *Broker) Serve(ctx context.Context) error {
 	// Bound how long a lost terminal event can keep a remote workload displaying
 	// as in-flight. Independent of persistence above: it guards the live set.
 	go b.runStaleWorkloadSweep(ctx)
+	go b.refreshEngineSettings(ctx)
 
 	// The scanner is the broker's core worker. Its supervisor's first
 	// spawn is synchronous so a hard startup failure stays fatal — the
@@ -2079,6 +2122,7 @@ func (b *Broker) Serve(ctx context.Context) error {
 	if b.engineMgrSup != nil {
 		defer b.engineMgrSup.Stop()
 	}
+	b.migrateLegacyEngineSettings()
 	b.prepareEnabledFacades()
 
 	// node-info is an auxiliary worker: spawning it lets the broker's own
@@ -2371,7 +2415,7 @@ func (b *Broker) forwardProxyNotificationForGeneration(generation uint64, method
 			Code string `json:"code"`
 			Port int    `json:"port"`
 		}
-		if json.Unmarshal(params, &ep) == nil && ep.Code == "bind-failed" {
+		if json.Unmarshal(params, &ep) == nil && ep.Code == "bind-failed" && !b.ollamaState().explicitSettings.Load() {
 			switch {
 			case b.ollamaState().managedFacade.Load() && ep.Port == managedOllamaFacadePort:
 				b.blockManagedOllamaFacade("another process acquired the compatibility port during startup")
@@ -3099,6 +3143,8 @@ func (b *Broker) handleMessage(msg *Message) {
 	}
 
 	switch msg.Method {
+	case "engine:get-settings", "engine:preview-settings", "engine:apply-settings":
+		go b.handleEngineSettings(msg)
 	case "ping":
 		if err := b.codec.Respond(msg.ID, PingResult{
 			Pong:     true,
@@ -3187,14 +3233,12 @@ func (b *Broker) handleMessage(msg *Message) {
 			log.Printf("failed to respond to proxy:unsubscribe: %v", err)
 		}
 
+	case "engine:set-port":
+		go b.handleSettingsPortRPC(msg, "")
 	case "ollama-proxy:set-port":
-		// Intercepted rather than relayed verbatim: the broker resolves a
-		// port conflict against the running engines (engines win, the proxy
-		// is bumped) before handing the proxy the port to bind.
-		b.handleProxySetPort(msg)
-
+		go b.handleSettingsPortRPC(msg, "ollama")
 	case "lmstudio-proxy:set-port":
-		b.handleLMStudioProxySetPort(msg)
+		go b.handleSettingsPortRPC(msg, "lmstudio")
 
 	case "lmstudio-proxy:get-status":
 		// Answered locally from the lmstudio-proxy handle's captured state,
@@ -3275,6 +3319,16 @@ func (b *Broker) handleMessage(msg *Message) {
 			log.Printf("failed to reject private engine method %s: %v", msg.Method, err)
 		}
 
+	// Reached only because the default branch relays every other engine:*
+	// method straight to the engine manager. Configuring a launch that way
+	// would skip the journal entry, the port reservation, and the proxy
+	// rebind that engine:apply-settings owns, leaving the broker's recorded
+	// settings describing an engine it no longer matches.
+	case "engine:configure-launch":
+		if err := b.codec.RespondError(msg.ID, -32601, "use engine:apply-settings for launch configuration"); err != nil {
+			log.Printf("failed to reject direct %s: %v", msg.Method, err)
+		}
+
 	case "engine:subscribe":
 		b.engineMu.Lock()
 		b.engineSubscribed = true
@@ -3349,6 +3403,10 @@ func (b *Broker) handleMessage(msg *Message) {
 // response asynchronously rather than fabricating a timeout — meanwhile
 // other client requests keep being served on the read-loop goroutine.
 func (b *Broker) relayToEngine(msg *Message) {
+	go b.relayToEngineNow(msg)
+}
+
+func (b *Broker) relayToEngineNow(msg *Message) {
 	if needsOllamaPortGate(msg.Method, msg.Params) && b.ollamaFacadeIsPendingBackend() {
 		go func() {
 			select {
@@ -3379,6 +3437,11 @@ func (b *Broker) relayToEngine(msg *Message) {
 	}
 
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
+	if isEnginePortAssignment || msg.Method == "engine:stop" || msg.Method == "engine:start" || msg.Method == "engine:restart" {
+		b.engineConfigMu.Lock()
+		defer b.engineConfigMu.Unlock()
+		defer b.reconcileLegacySettingsLocked()
+	}
 	isOllamaPortAssignment := isEnginePortAssignment && requestedEngine == "ollama"
 	if isEnginePortAssignment && b.rejectOllamaHostAliasPort(msg, requestedPort, requestedEngine) {
 		return
@@ -3408,36 +3471,30 @@ func (b *Broker) relayToEngine(msg *Message) {
 	// read loop allocates a fresh Message per request so these are stable.
 	id := msg.ID
 	method := msg.Method
-	relayErr := em.RelayRequest(method, msg.Params, func(result json.RawMessage, rpcErr *RPCError, err error) {
-		switch {
-		case err != nil:
-			if e := b.codec.RespondError(id, -32000, fmt.Sprintf("engine call failed: %v", err)); e != nil {
-				log.Printf("failed to relay engine error for %s: %v", method, e)
+	result, rpcErr, err := em.CallNoTimeout(context.Background(), method, msg.Params)
+	switch {
+	case err != nil:
+		if e := b.codec.RespondError(id, -32000, fmt.Sprintf("engine call failed: %v", err)); e != nil {
+			log.Printf("failed to relay engine error for %s: %v", method, e)
+		}
+	case rpcErr != nil:
+		if e := b.codec.RespondError(id, rpcErr.Code, rpcErr.Message); e != nil {
+			log.Printf("failed to relay engine error for %s: %v", method, e)
+		}
+	default:
+		if isOllamaPortAssignment {
+			var status struct {
+				Port int `json:"port"`
 			}
-		case rpcErr != nil:
-			if e := b.codec.RespondError(id, rpcErr.Code, rpcErr.Message); e != nil {
-				log.Printf("failed to relay engine error for %s: %v", method, e)
-			}
-		default:
-			if isOllamaPortAssignment {
-				var status struct {
-					Port int `json:"port"`
-				}
-				if json.Unmarshal(result, &status) == nil && status.Port > 0 {
-					b.ollamaState().backendPort.Store(int32(status.Port))
-				}
-			}
-			if isLMStudioSetPort {
-				b.lmstudioState().backendPort.Store(int32(requestedLMStudioPort))
-			}
-			if e := b.codec.Respond(id, result); e != nil {
-				log.Printf("failed to relay engine result for %s: %v", method, e)
+			if json.Unmarshal(result, &status) == nil && status.Port > 0 {
+				b.ollamaState().backendPort.Store(int32(status.Port))
 			}
 		}
-	})
-	if relayErr != nil {
-		if err := b.codec.RespondError(msg.ID, -32000, fmt.Sprintf("engine call failed: %v", relayErr)); err != nil {
-			log.Printf("failed to respond to %s: %v", msg.Method, err)
+		if isLMStudioSetPort {
+			b.lmstudioState().backendPort.Store(int32(requestedLMStudioPort))
+		}
+		if e := b.codec.Respond(id, result); e != nil {
+			log.Printf("failed to relay engine result for %s: %v", method, e)
 		}
 	}
 }

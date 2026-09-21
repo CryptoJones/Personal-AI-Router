@@ -119,6 +119,7 @@ reserved for inference clients.
 | `ollama-proxy:ready` / `lmstudio-proxy:ready`        | Record engine proxy port                                                                                                        | `engines:state-changed`                                   |
 | proxy `node/*`                                       | Update per-engine node presence; the advertised port is the peer's promoted proxy port (not the engine's private loopback port) | node and engine pushes                                    |
 | `engine:ready` / `engine:state-changed`              | Update engine facts and models                                                                                                  | `engines:state-changed`                                   |
+| `engine:settings-changed`                            | Validate and republish the owning node's settings snapshot                                                                      | `engines:settings-changed`                                |
 | `engine:install-progress` / `engine:remote-progress` | Update operation progress                                                                                                       | engine progress pushes                                    |
 | `errors:update`                                      | Replace the error snapshot                                                                                                      | `errors:update`                                           |
 | `cluster:invite-received`                            | Parse inbound invite                                                                                                            | `cluster:invite-received`                                 |
@@ -151,6 +152,31 @@ progress, or error pushes.
 Local engine operations include install, start, stop, uninstall, update, port
 changes, and model actions. Remote cluster operations use the engine manager's
 remote control surface where supported.
+
+### Engine settings
+
+Ports and the engine arguments are one authoritative, revisioned record owned by
+the node running the engine. The broker exposes `engine:{get,preview,apply}-settings`
+and relays a request naming another node to that peer's engine manager, so a
+clustered device is edited like the local one. Preview validates without
+persisting or starting anything; apply journals the accepted revision, then
+stops, rebinds the proxy, and restarts as needed, and returns only an
+acknowledgement — the outcome arrives as an `engine:settings-changed`
+notification, which Personal AI Router republishes as `engines:settings-changed`.
+A revision mismatch is rejected rather than merged, and an operation interrupted
+by a crash is recovered from the journal at the next startup.
+
+`engine:configure-launch` is refused at the broker's client surface with
+`-32601`: reaching the engine manager directly would skip the journal, the port
+reservation, and the proxy rebind that apply owns. `engine:set-port` is the
+port-only entry point the TUI uses; the broker intercepts it and runs the same
+authoritative operation rather than forwarding it, so both callers validate,
+restart, and persist identically.
+
+Launch arguments and environment values pass through literally without an
+engine-option catalog. Only managed networking and CORS are semantically
+validated. Managed CORS origin-list and boolean-control changes must originate on the owning node; other
+environment assignments can also be changed by a pinned peer.
 
 `engine:stop` (and its cluster `ec` equivalent) reclaims an orphan a prior run
 left on the engine's own managed port, terminating it only when that PID is

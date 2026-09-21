@@ -89,7 +89,7 @@ func (b *Broker) forwardLMStudioProxyNotificationForGeneration(generation uint64
 			Code string `json:"code"`
 			Port int    `json:"port"`
 		}
-		if json.Unmarshal(params, &ep) == nil && ep.Code == "bind-failed" {
+		if json.Unmarshal(params, &ep) == nil && ep.Code == "bind-failed" && !b.lmstudioState().explicitSettings.Load() {
 			if b.lmstudioState().managedFacade.Load() && ep.Port == managedLMStudioFacadePort {
 				_, _ = b.blockManagedLMStudioFacade("another process acquired the compatibility port during startup", nil)
 			} else {

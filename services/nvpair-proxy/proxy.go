@@ -915,9 +915,15 @@ type modelListItem struct {
 }
 
 type modelListResult struct {
-	items []modelListItem
-	ok    bool
-	err   error
+	headers http.Header
+	denied  bool
+	// unavailable marks a candidate that never answered — unreachable or a
+	// server error — as opposed to one that answered unusably. Only the former
+	// is excluded from the CORS intersection.
+	unavailable bool
+	items       []modelListItem
+	ok          bool
+	err         error
 }
 
 // serveModelList queries every candidate concurrently and returns the engine's
@@ -931,7 +937,6 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, role rou
 	p := f.host
 	openAI := role == roleModelListOpenAIGET
 	writeJSON := func(status int, body []byte) {
-		cors.Apply(w.Header())
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(status)
@@ -949,13 +954,19 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, role rou
 			results[i].err = err
 			continue
 		}
-		upstream.Header.Set("Accept", "application/json")
+		upstream.Header = cors.FanoutHeaders(r.Header)
+		upstream.Header.Del("Content-Length")
+		if upstream.Header.Get("Accept") == "" {
+			upstream.Header.Set("Accept", "application/json")
+		}
 
 		// A cluster-peer candidate is queried over mTLS to its promoted proxy;
 		// self/manual candidates use the shared plain client.
-		client := modelListClient
+		clientCopy := *modelListClient
+		clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client := &clientCopy
 		if cand.peerUUID != "" {
-			client = &http.Client{Timeout: modelListClient.Timeout, Transport: p.candidateTransport(cand)}
+			client.Transport = p.candidateTransport(cand)
 		}
 
 		wg.Add(1)
@@ -964,10 +975,20 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, role rou
 			resp, err := client.Do(req)
 			if err != nil {
 				f.targets.Forget(cand.id)
-				results[i].err = err
+				results[i] = modelListResult{unavailable: true, err: err}
 				return
 			}
 			defer resp.Body.Close()
+			responseHeaders := cors.EndToEndHeaders(resp.Header)
+			results[i].headers = responseHeaders
+			if r.Header.Get("Origin") != "" && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || (resp.StatusCode == http.StatusOK && !cors.AllowsOrigin(responseHeaders, r.Header.Get("Origin")))) {
+				results[i].denied = true
+				return
+			}
+			if resp.StatusCode >= 500 {
+				results[i] = modelListResult{unavailable: true, err: fmt.Errorf("upstream returned %s", resp.Status)}
+				return
+			}
 			if resp.StatusCode != http.StatusOK {
 				results[i].err = fmt.Errorf("upstream returned %s", resp.Status)
 				return
@@ -1023,10 +1044,56 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, role rou
 				}
 				items = append(items, modelListItem{key: key, digest: identity.Digest, raw: raw})
 			}
-			results[i] = modelListResult{items: items, ok: true}
+			results[i] = modelListResult{items: items, ok: true, headers: responseHeaders}
 		}(i, cand, upstream, client)
 	}
 	wg.Wait()
+
+	var combinedHeaders http.Header
+	if r.Header.Get("Origin") != "" {
+		headers := make([]http.Header, 0, len(results))
+		invalidInventory := false
+		for _, result := range results {
+			// An engine that answered and refused the origin is a real denial;
+			// its peers must not vote it away.
+			if result.denied {
+				writeJSON(http.StatusForbidden, []byte(`{"error":"an engine denied access to the model list"}`))
+				return http.StatusForbidden, fmt.Errorf("engine denied model list")
+			}
+			// An engine that never answered expressed no opinion. Its models
+			// are dropped from the merged list below, so intersecting its
+			// absent headers would let one unreachable node deny the browser
+			// access to every reachable one.
+			if result.unavailable {
+				continue
+			}
+			// An engine that answered unusably is reachable and broken. Do not
+			// quietly hand a browser a list that silently omits it.
+			if !result.ok {
+				invalidInventory = true
+			}
+			headers = append(headers, result.headers)
+		}
+		if len(headers) == 0 {
+			writeJSON(http.StatusBadGateway, []byte(`{"error":"model inventory unavailable"}`))
+			return http.StatusBadGateway, fmt.Errorf("model inventory unavailable")
+		}
+		var allowed bool
+		combinedHeaders, allowed = cors.Combine(r, headers)
+		if invalidInventory {
+			if allowed {
+				for key, values := range combinedHeaders {
+					w.Header()[key] = values
+				}
+			}
+			writeJSON(http.StatusBadGateway, []byte(`{"error":"model inventory unavailable"}`))
+			return http.StatusBadGateway, fmt.Errorf("model inventory unavailable")
+		}
+		if !allowed {
+			writeJSON(http.StatusForbidden, []byte(`{"error":"engines do not all permit access to the model list"}`))
+			return http.StatusForbidden, fmt.Errorf("engines denied model list")
+		}
+	}
 
 	success := false
 	models := make([]json.RawMessage, 0)
@@ -1072,6 +1139,9 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, role rou
 		writeJSON(http.StatusInternalServerError, []byte(`{"error":"failed to encode model inventory"}`))
 		return http.StatusInternalServerError, err
 	}
+	for key, values := range combinedHeaders {
+		w.Header()[key] = values
+	}
 	writeJSON(http.StatusOK, body)
 	return http.StatusOK, nil
 }
@@ -1098,6 +1168,16 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		routingModel = model
 	}
 	candidates := f.resolveCandidates(routingModel)
+	if cors.IsPreflight(r) {
+		targets := make([]cors.Target, 0, len(candidates))
+		for _, cand := range candidates {
+			targets = append(targets, cors.Target{URL: cand.url, Transport: p.candidateTransport(cand)})
+		}
+		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK}
+		cors.ServePreflight(sc, r, targets)
+		f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: r.URL.Path, Target: "cluster", Status: sc.status, Duration: time.Since(start).Milliseconds()})
+		return
+	}
 	// held is this request's claim on a node's capacity while it is in flight.
 	// resMu guards it because failover re-points it from the ReverseProxy's
 	// callbacks while the disconnect watcher may be releasing it.
@@ -1146,12 +1226,6 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(candidates) == 0 {
-		// With no engine to consult, retain the local permissive preflight used
-		// for engines that do not publish a CORS policy.
-		if cors.WritePreflight(w, r) {
-			return
-		}
-		cors.Apply(w.Header())
 		rejectionBody := `{"error":"no active node selected or available"}`
 		rejectionError := "no active node"
 		if isInf && model != "" {
@@ -1686,10 +1760,6 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				if peeked != nil {
 					resp.Body = peeked
 				}
-				// Prefer an engine-declared preflight policy so an exact origin plus
-				// Allow-Credentials can pass a credentialed browser fetch. Engines
-				// that publish no policy retain the proxy's permissive 204 fallback.
-				cors.CompletePreflightFallback(resp)
 				// Committing to this candidate — body stream is about to begin.
 				ttfbMs = time.Since(start).Milliseconds()
 				servedNodeID = cand.id
@@ -1703,16 +1773,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				// came from the node. Same goroutine as the body copy, so no
 				// synchronization is needed.
 				sc.upstreamAlive = func() { p.reportActivity(cand.id) }
-				// The engine may enforce its own origin policy (Ollama's
-				// OLLAMA_ORIGINS). Honor it: overwriting a declared
-				// Access-Control-Allow-Origin would silently widen the user's
-				// policy, and a wildcard is invalid alongside
-				// Allow-Credentials, so it would break a credentialed response
-				// outright. An engine that omits the header has expressed
-				// nothing to preserve, so the proxy supplies its own.
-				if resp.Header.Get("Access-Control-Allow-Origin") == "" {
-					cors.Apply(resp.Header)
-				}
+				// Preserve the upstream response, including absent CORS permissions.
 				if !started {
 					started = true
 					_ = f.notify("proxy/request-started", RequestStartedEvent{
@@ -1780,10 +1841,6 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				respondedWithError = true
 				servedNodeID = cand.id
 				servedTarget = cand.url.Host
-				if cors.WritePreflight(ew, r) {
-					proxyErr = ""
-					return
-				}
 				proxyErr = err.Error()
 				slog.Warn("proxy upstream error, retries exhausted",
 					"id", reqID, "node_id", cand.id, "target", cand.url.Host,
@@ -1801,7 +1858,6 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				if stderrors.Is(err, errFirstBodyTimeout) {
 					status = http.StatusGatewayTimeout
 				}
-				cors.Apply(ew.Header())
 				ew.Header().Set("Content-Type", "application/json")
 				ew.Header().Set("X-Content-Type-Options", "nosniff")
 				ew.WriteHeader(status)
@@ -1857,7 +1913,6 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if mErr != nil {
 			body = []byte(`{"error":"retry budget exhausted"}`)
 		}
-		cors.Apply(w.Header())
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		// Advisory only: the caller knows its own patience better than we do.

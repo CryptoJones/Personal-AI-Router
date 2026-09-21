@@ -5,6 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+The [engine settings protocol](ENGINE_SETTINGS.md) documents local/paired
+launch and port editing, revision checks, serialized application and recovery.
+
 A Go service that exposes the NVIDIA Personal AI Router API to **UI processes**
 and other clients (CLIs, dashboards, mobile companions, scripts, tests, etc.).
 The shipped graphical UI is bundled alongside the backend services and launches
@@ -383,13 +386,15 @@ Two relay-specific error cases:
 
 #### `ollama-proxy:set-port`
 
-**Intercepted, not relayed verbatim** — this is where the broker coordinates the engine ↔ proxy port conflict, because it's the only component that sees both. On `ollama-proxy:set-port {port}` the broker asks `nvpair-engine-manager` (`engine:get-installed`) which ports its **running** engines hold. If the requested port is free, it relays `set-port {port}` to the proxy unchanged. If a running engine already holds it, **the engine wins**: the broker bumps the proxy to the next free port, relays `set-port {effectivePort}`, and surfaces a sticky `warning` into the errors pipeline (id `ollama-proxy:port-bumped`, `action:"none"`) explaining the move; a later non-colliding `ollama-proxy:set-port` clears that warning. The conflict path **never changes an engine's port** — only the proxy is moved. The response is the proxy's own `set-port` result (`{version, port}` with the actually-bound port).
+**Intercepted, not relayed verbatim.** A port-only caller — `nvpair-tui` is the one in tree — gets to move a single port without rendering the whole launch settings form, but the change still runs through the same authoritative settings operation the desktop editor uses, so a port set from the terminal cannot diverge from one set from the UI. The broker reads the engine's current settings, substitutes the requested proxy port, and applies the result.
+
+A **requested port that is already in use is refused** with error `-32000 "port %d is already in use"`. The broker does not pick a different port on the caller's behalf: silently binding somewhere else left clients pointed at a port nothing was listening on. Retry with a free port. A request that collides with an inherited `OLLAMA_HOST` alias is refused with its own message naming that alias. The response echoes the requested port (`{"port": <requested>}`) once it is bound.
 
 ```json
 {"jsonrpc":"2.0","id":9,"method":"ollama-proxy:set-port","params":{"port":11500}}
 ```
 
-The same check runs whenever the proxy announces a (re)bound port (its restored port on startup), so a proxy that comes back up on a port a running engine has since taken is steered to a free one automatically. Error `-32000 "ollama-proxy not available"` when no proxy is supervised.
+Automatic conflict resolution still exists, but only for a port the user did not just choose: when the proxy announces a (re)bound port on startup and a running engine has since taken it, the broker steers the proxy to a free port and surfaces a sticky `warning` into the errors pipeline (id `ollama-proxy:port-bumped`, `action:"none"`) explaining the move. That path **never changes an engine's port** — only the proxy is moved. Error `-32000 "ollama-proxy not available"` when no proxy is supervised.
 
 #### `lmstudio-proxy:get-status` / `lmstudio-proxy:subscribe` / `lmstudio-proxy:unsubscribe` / `lmstudio-proxy:<method>` (generic relay)
 
@@ -477,7 +482,9 @@ Opt into / out of the `engine:<event>` stream (off by default). Acks `{ subscrib
 
 #### `engine:<method>` (generic relay)
 
-Any other `engine:*` request is forwarded to `nvpair-engine-manager` verbatim and its response relayed straight back. This covers the whole engine control plane: `engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`, `engine:uninstall`, `engine:start`, `engine:stop`, `engine:restart`, `engine:set-port`, `engine:action`, `engine:logs`, `engine:errors`, `engine:models`. (`engine:set-port` persists the engine's server port as a manifest override that survives a restart — see the `nvpair-engine-manager` README.) Lifecycle ops run for minutes (reporting progress via the `engine:install-progress` / `engine:state-changed` push events), so the relay imposes **no broker-side timeout** — fire the request and watch the event stream for the outcome. Error `-32000 "engine-manager not available"` when no engine-manager is supervised.
+Any other `engine:*` request is forwarded to `nvpair-engine-manager` verbatim and its response relayed straight back. This covers the whole engine control plane: `engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`, `engine:uninstall`, `engine:start`, `engine:stop`, `engine:restart`, `engine:action`, `engine:logs`, `engine:errors`, `engine:models`. Lifecycle ops run for minutes (reporting progress via the `engine:install-progress` / `engine:state-changed` push events), so the relay imposes **no broker-side timeout** — fire the request and watch the event stream for the outcome. Error `-32000 "engine-manager not available"` when no engine-manager is supervised.
+
+`engine:set-port` is **not** in that generic set. Like `proxy:set-port` it is intercepted and run through the authoritative settings operation, so moving an engine's server port from a port-only caller validates and restarts exactly as the full editor does, and persists as a manifest override that survives a restart. Its response is the engine's `engine:status` result.
 
 #### `settings/<method>` (generic relay)
 

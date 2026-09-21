@@ -250,6 +250,9 @@ func (b *Broker) prepareManagedOllamaFacade() {
 }
 
 func (b *Broker) prepareManagedOllamaFacadeWithPortCheck(portAvailable func(int) bool) {
+	if b.prepareExplicitEngineSettings("ollama") {
+		return
+	}
 	b.setOllamaHostAlias(ollamaHostAlias{})
 	// Resolve the worker inside the deferred method: engine-manager can respawn
 	// while the blocking settings/status calls below are preparing the alias.
@@ -389,13 +392,6 @@ func (b *Broker) rejectOllamaHostAliasPort(msg *Message, port int, owner string)
 	return true
 }
 
-// handleLMStudioProxySetPort used to relay the request verbatim, so a user
-// could park the LM Studio proxy on a port a running engine already held and
-// get no warning. It now takes the same path Ollama's does.
-func (b *Broker) handleLMStudioProxySetPort(msg *Message) {
-	b.handleEngineProxySetPort(lmstudioProxyProfile, msg)
-}
-
 // needsOllamaPortGate reports the client requests that can probe and adopt the
 // configured Ollama port. While :11434 is changing from backend to facade,
 // those probes must wait or they can mistake the proxy for a local engine.
@@ -412,111 +408,6 @@ func needsOllamaPortGate(method string, params json.RawMessage) bool {
 	return json.Unmarshal(params, &request) == nil && request.Engine == "ollama"
 }
 
-// handleProxySetPort intercepts proxy:set-port (rather than relaying it
-// verbatim like the rest of the proxy: namespace) so it can resolve a port
-// conflict against the running engines before handing the proxy the port to
-// bind. It responds with the proxy's own set-port result (which echoes the
-// actually-bound port).
-func (b *Broker) handleProxySetPort(msg *Message) {
-	b.handleEngineProxySetPort(ollamaProxyProfile, msg)
-}
-
-// handleEngineProxySetPort is the engine-agnostic form. Both proxies get the
-// same treatment: validate the port, resolve it against the running engines,
-// then hand the proxy the port to bind and echo back what it actually bound.
-func (b *Broker) handleEngineProxySetPort(profile engineProxyProfile, msg *Message) {
-	respondErr := func(code int, format string, args ...any) {
-		if err := b.codec.RespondError(msg.ID, code, fmt.Sprintf(format, args...)); err != nil {
-			log.Printf("failed to respond to %s: %v", msg.Method, err)
-		}
-	}
-
-	// Validate the request before reporting on the proxy: a port that is
-	// reserved for the inherited OLLAMA_HOST alias is refused with an
-	// actionable message whether or not the proxy happens to be up, which is
-	// more use than "not available".
-	var params struct {
-		Port int `json:"port"`
-	}
-	if err := json.Unmarshal(msg.Params, &params); err != nil {
-		respondErr(-32602, "invalid params: expected {\"port\": <int>}")
-		return
-	}
-	if params.Port < 1 || params.Port > 65535 {
-		respondErr(-32602, "port must be between 1 and 65535")
-		return
-	}
-	if b.rejectOllamaHostAliasPort(msg, params.Port, "the "+profile.DisplayName+" proxy") {
-		return
-	}
-
-	p := b.engineProxyHandle(profile)
-	if p == nil {
-		respondErr(-32000, "%s not available", profile.ComponentName())
-		return
-	}
-
-	effective := b.resolveEngineProxyPort(profile, params.Port)
-
-	body, err := json.Marshal(map[string]int{"port": effective})
-	if err != nil {
-		respondErr(-32000, "encode set-port: %v", err)
-		return
-	}
-	result, rpcErr, err := p.Call(context.Background(), profile.addressed("set-port"), body)
-	switch {
-	case err != nil:
-		respondErr(-32000, "proxy set-port failed: %v", err)
-	case rpcErr != nil:
-		if err := b.codec.RespondError(msg.ID, rpcErr.Code, rpcErr.Message); err != nil {
-			log.Printf("failed to relay proxy set-port error: %v", err)
-		}
-	default:
-		if err := b.codec.Respond(msg.ID, result); err != nil {
-			log.Printf("failed to relay proxy set-port result: %v", err)
-		}
-	}
-}
-
-// resolveProxyPort returns the port the proxy should actually bind for a
-// requested port: the request itself when free, or the next free port when a
-// running engine already holds it (engines take precedence). A bump surfaces
-// a sticky warning into the errors pipeline; a clean request clears any stale
-// one so the notice doesn't outlive the conflict.
-func (b *Broker) resolveProxyPort(requested int) int {
-	return b.resolveEngineProxyPort(ollamaProxyProfile, requested)
-}
-
-// resolveEngineProxyPort is the engine-agnostic form. A managed facade is not
-// negotiable, so the request is answered with the facade port; otherwise a port
-// a running engine already holds is bumped past, because engines take
-// precedence over their proxy.
-func (b *Broker) resolveEngineProxyPort(p engineProxyProfile, requested int) int {
-	bumpedID := p.portBumpedID()
-	if b.managedFacade(p) {
-		b.forwardErrorsClear(bumpedID)
-		return p.FacadePort
-	}
-	taken := b.runningEnginePorts()
-	if aliasPort := b.currentOllamaHostAlias().Port; aliasPort > 0 {
-		taken[aliasPort] = true
-	}
-	effective := nextFreeProxyPort(requested, taken)
-	if effective != requested {
-		b.forwardErrorsReport(errors.ServiceError{
-			ID:        bumpedID,
-			Message:   fmt.Sprintf("Port %d is in use by a running engine; the %s proxy was moved to %d.", requested, p.DisplayName, effective),
-			Timestamp: nowMillis(),
-			NodeID:    b.nodeID,
-			Severity:  "warning",
-			Action:    "none",
-		})
-	} else {
-		b.forwardErrorsClear(bumpedID)
-	}
-	return effective
-}
-
 // reconcileProxyPortOnReady runs after the proxy announces a bound port
 // (notably its restored port on startup). If a running engine now holds that
 // port, it steers the proxy to a free one — engines take precedence — and
@@ -524,6 +415,16 @@ func (b *Broker) resolveEngineProxyPort(p engineProxyProfile, requested int) int
 // goroutine that calls forwardProxyNotification), so the p.Call round-trip
 // can't deadlock the very reader that would deliver its response.
 func (b *Broker) reconcileProxyPortOnReady(boundPort int) {
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	if b.loadEngineSettingsLocked() != nil {
+		b.markOllamaPortReady()
+		return
+	}
+	if _, explicit := b.explicitEngineSettingsLocked("ollama"); explicit {
+		b.markOllamaPortReady()
+		return
+	}
 	if b.ollamaState().managedFacade.Load() {
 		p := b.getProxy()
 		if p == nil {

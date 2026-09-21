@@ -146,38 +146,15 @@ LM Studio additionally refuses to restore port 1235 even if it is stored: that
 is where engine-manager runs a managed LM Studio, so a proxy restoring it would
 sit on the engine's own port. The stored value predates the current default.
 
-**Browser clients (CORS).** The proxy is usable from a web front end. When an
-engine is available, the proxy forwards an `OPTIONS` preflight so an
-engine-declared exact origin and credentials policy reaches the browser
-unchanged. If no engine is available, the engine returns no CORS policy, or a
-non-loopback caller must be refused before routing, the proxy answers with its
-own permissive `204` fallback. It also labels every response it generates —
-including rejections such as the `502` when no node is available and the `403`
-refusing a non-loopback plaintext caller — with `Access-Control-Allow-Origin: *`.
-That matters as much as the success path: a response without those headers
-reaches the browser as a generic "CORS error" with the real status and reason
-stripped out, so the caller cannot tell what went wrong. A locally answered
-preflight grants no access, since the request that follows still faces the same
-gate. The policy comes from `nvpair-shared/cors`, so every engine answers
-identically.
+**Browser clients (CORS).** PAIR does not enable CORS or add default browser permissions. Configure origins through the engine; its built-in defaults and user configuration remain authoritative. Ordinary forwarded responses preserve the upstream status, body, and CORS headers, including missing headers. A denial is never replaced with a successful OPTIONS response or retried to find permission elsewhere. Proxy-generated errors carry their actual status without CORS permission headers, so browser JavaScript may see a generic CORS failure while curl and diagnostics show the real error.
 
-A response *forwarded from an engine* is different: if the engine set its own
-`Access-Control-Allow-Origin` (Ollama with `OLLAMA_ORIGINS`), that header is
-passed through untouched rather than replaced with the wildcard, so a
-deliberately narrow engine policy is never silently widened and a credentialed
-response is not broken. An engine that sends no CORS header has expressed no
-policy to keep, so the proxy supplies its own — and drops any
-`Access-Control-Allow-Credentials` that arrived without an origin, because a
-browser rejects that header alongside a wildcard origin and would discard the
-response the fallback exists to make readable.
+A browser preflight (OPTIONS with Origin and Access-Control-Request-Method) queries every currently routable target, with concurrency eight, a ten-second query deadline, and no redirects. A single target's response is relayed. Multiple responding targets must all permit the requested origin, method, and headers; PAIR grants only their shared permissions. Credentials require unanimous explicit support. Synthesized preflights allow browsers to cache the result for 60 seconds; PAIR itself does not cache decisions. A policy denial returns 403. Unavailable targets are skipped; if none can answer, the proxy returns 502. Ordinary OPTIONS requests retain normal routing. Preflights do not create inference jobs or reserve scheduler capacity. Paired ingress forwards only to its local engine.
 
-One limit is outside the proxy's control: current Chromium-based browsers gate a
-request from a public origin to a local or loopback address behind the user's
-[Local Network Access](https://chromestatus.com/feature/5152728072060928)
-permission, which replaced the old server-side opt-in header. No header the
-proxy sends can grant that. A hosted page needs the permission plus a
-`fetch(url, { targetAddressSpace: 'loopback' })` annotation; a page served from
-the local machine is unaffected.
+Combined model lists forward the caller's origin and end-to-end headers, excluding Authorization and Cookie so credentials are not shared across engines. Multi-target preflights apply the same credential filtering. With an Origin header, every responding engine must return a valid list and permit sharing: one denial returns 403 and one invalid list returns 502, without partial inventory. An invalid-list error retains the combined CORS permissions when every responding engine allows the origin. Unavailable engines are skipped, with 502 returned when none can answer. Successful lists combine origin/credential permissions and Vary requirements. Requests without Origin retain partial aggregation when some inventories are unavailable. Engines without CORS support remain unavailable to cross-origin browser clients through PAIR.
+
+Both engine facades use nvpair-shared/cors. Neither facade reads engine environment variables or parses launch commands to determine CORS policy.
+
+One limit is outside the proxy's control: current Chromium-based browsers gate a request from a public origin to a local or loopback address behind the user's [Local Network Access](https://chromestatus.com/feature/5152728072060928) permission, which replaced the old server-side opt-in header. No header the proxy sends can grant that. A hosted page needs the permission plus a `fetch(url, { targetAddressSpace: 'loopback' })` annotation; a page served from the local machine is unaffected.
 
 ### Node selection
 

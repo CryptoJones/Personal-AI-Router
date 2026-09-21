@@ -69,6 +69,7 @@ type e2eFrame struct {
 }
 
 func e2eReadFrames(r io.Reader, out chan<- e2eFrame) {
+	defer close(out)
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -92,28 +93,50 @@ func e2eSend(t *testing.T, w io.Writer, id int, method string, params any) {
 	}
 }
 
-func e2eWaitResult(t *testing.T, frames <-chan e2eFrame, id string, timeout time.Duration) {
+// e2eInbox retains interleaved replies and notifications for later waits.
+// All waits for a child process share one inbox and run on the test goroutine.
+type e2eInbox struct {
+	frames  <-chan e2eFrame
+	pending []e2eFrame
+}
+
+func (in *e2eInbox) wait(t *testing.T, match func(e2eFrame) bool, description string, timeout time.Duration) e2eFrame {
 	t.Helper()
-	deadline := time.After(timeout)
+	for i, f := range in.pending {
+		if match(f) {
+			in.pending = append(in.pending[:i], in.pending[i+1:]...)
+			return f
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	for {
 		select {
-		case f := <-frames:
-			if string(f.ID) != id {
-				continue
+		case f, ok := <-in.frames:
+			if !ok {
+				t.Fatalf("stream closed waiting for %s", description)
 			}
-			if len(f.Error) > 0 && string(f.Error) != "null" {
-				t.Fatalf("rpc id %s returned error: %s", id, f.Error)
+			if match(f) {
+				return f
 			}
-			return
-		case <-deadline:
-			t.Fatalf("timed out waiting for response id %s", id)
+			in.pending = append(in.pending, f)
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s", description)
 		}
+	}
+}
+
+func e2eWaitResult(t *testing.T, frames *e2eInbox, id string, timeout time.Duration) {
+	t.Helper()
+	f := frames.wait(t, func(f e2eFrame) bool { return string(f.ID) == id }, "response id "+id, timeout)
+	if len(f.Error) > 0 && string(f.Error) != "null" {
+		t.Fatalf("rpc id %s returned error: %s", id, f.Error)
 	}
 }
 
 // e2eEnableWithRetry enables a facade, trying a fresh port whenever the child
 // reports a lost bind race, and returns the port it actually bound.
-func e2eEnableWithRetry(t *testing.T, stdin io.Writer, frames <-chan e2eFrame, engine string, port int) int {
+func e2eEnableWithRetry(t *testing.T, stdin io.Writer, frames *e2eInbox, engine string, port int) int {
 	t.Helper()
 	for attempt := 0; attempt < 8; attempt++ {
 		id := 100 + attempt
@@ -139,57 +162,79 @@ func e2eEnableWithRetry(t *testing.T, stdin io.Writer, frames <-chan e2eFrame, e
 // e2eEnabledPort reads the port a facade/enable bound, reporting bindRace when
 // the child refused because the port was taken. Only a bind race is retryable;
 // any other rejection is a real failure.
-func e2eEnabledPort(t *testing.T, frames <-chan e2eFrame, id string, timeout time.Duration) (port int, bindRace bool) {
+func e2eEnabledPort(t *testing.T, frames *e2eInbox, id string, timeout time.Duration) (port int, bindRace bool) {
 	t.Helper()
-	deadline := time.After(timeout)
-	for {
-		select {
-		case f := <-frames:
-			if string(f.ID) != id {
-				continue
-			}
-			if len(f.Error) > 0 && string(f.Error) != "null" {
-				var rpcErr struct {
-					Code int `json:"code"`
-				}
-				if json.Unmarshal(f.Error, &rpcErr) == nil && rpcErr.Code == codeFacadeBindFailed {
-					return 0, true
-				}
-				t.Fatalf("facade/enable returned error: %s", f.Error)
-			}
-			var res struct {
-				Port int `json:"port"`
-			}
-			if err := json.Unmarshal(f.Result, &res); err != nil {
-				t.Fatalf("parse facade/enable result: %v", err)
-			}
-			return res.Port, false
-		case <-deadline:
-			t.Fatalf("timed out waiting for facade/enable response id %s", id)
+	f := frames.wait(t, func(f e2eFrame) bool { return string(f.ID) == id }, "facade/enable response id "+id, timeout)
+	if len(f.Error) > 0 && string(f.Error) != "null" {
+		var rpcErr struct {
+			Code int `json:"code"`
 		}
+		if json.Unmarshal(f.Error, &rpcErr) == nil && rpcErr.Code == codeFacadeBindFailed {
+			return 0, true
+		}
+		t.Fatalf("facade/enable returned error: %s", f.Error)
 	}
+	var res struct {
+		Port int `json:"port"`
+	}
+	if err := json.Unmarshal(f.Result, &res); err != nil {
+		t.Fatalf("parse facade/enable result: %v", err)
+	}
+	return res.Port, false
 }
 
-func e2eWaitReadyPort(t *testing.T, frames <-chan e2eFrame, timeout time.Duration) int {
+func e2eWaitReadyPort(t *testing.T, frames *e2eInbox, timeout time.Duration) int {
 	t.Helper()
-	deadline := time.After(timeout)
-	for {
-		select {
-		case f := <-frames:
-			if f.Method != "ready" {
-				continue
+	f := frames.wait(t, func(f e2eFrame) bool { return f.Method == "ready" }, "ready notification", timeout)
+	var p struct {
+		Port int `json:"port"`
+	}
+	if err := json.Unmarshal(f.Params, &p); err != nil {
+		t.Fatalf("parse ready params: %v", err)
+	}
+	return p.Port
+}
+
+func TestE2EInboxPreservesInterleavedFrames(t *testing.T) {
+	for _, readyFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("ready-first-%t", readyFirst), func(t *testing.T) {
+			source := make(chan e2eFrame, 4)
+			source <- e2eFrame{ID: json.RawMessage("2"), Result: json.RawMessage(`{}`)}
+			ready := e2eFrame{Method: "ready", Params: json.RawMessage(`{"port":12345}`)}
+			enabled := e2eFrame{ID: json.RawMessage("100"), Result: json.RawMessage(`{"port":12345}`)}
+			if readyFirst {
+				source <- ready
+				source <- enabled
+			} else {
+				source <- enabled
+				source <- ready
 			}
-			var p struct {
-				Port int `json:"port"`
+			source <- e2eFrame{ID: json.RawMessage("1"), Result: json.RawMessage(`{}`)}
+			close(source)
+			frames := &e2eInbox{frames: source}
+			if readyFirst {
+				port, retry := e2eEnabledPort(t, frames, "100", time.Second)
+				if retry || port != 12345 {
+					t.Fatalf("enabled port=%d retry=%v", port, retry)
+				}
+				if port := e2eWaitReadyPort(t, frames, time.Second); port != 12345 {
+					t.Fatalf("ready port=%d", port)
+				}
+			} else {
+				if port := e2eWaitReadyPort(t, frames, time.Second); port != 12345 {
+					t.Fatalf("ready port=%d", port)
+				}
+				port, retry := e2eEnabledPort(t, frames, "100", time.Second)
+				if retry || port != 12345 {
+					t.Fatalf("enabled port=%d retry=%v", port, retry)
+				}
 			}
-			if err := json.Unmarshal(f.Params, &p); err != nil {
-				t.Fatalf("parse ready params: %v", err)
+			e2eWaitResult(t, frames, "1", time.Second)
+			e2eWaitResult(t, frames, "2", time.Second)
+			if len(frames.pending) != 0 {
+				t.Fatalf("unconsumed frames: %+v", frames.pending)
 			}
-			return p.Port
-		case <-deadline:
-			t.Fatalf("timed out waiting for ready notification")
-			return 0
-		}
+		})
 	}
 }
 
@@ -270,8 +315,9 @@ func TestE2EFailoverOverRealBinary(t *testing.T) {
 			_ = cmd.Wait()
 		}()
 
-		frames := make(chan e2eFrame, 256)
-		go e2eReadFrames(stdout, frames)
+		source := make(chan e2eFrame, 256)
+		go e2eReadFrames(stdout, source)
+		frames := &e2eInbox{frames: source}
 
 		// Retried on a bind race: e2eFreePort can only probe-then-close, and a
 		// process spawn sits between the probe and the child's bind, so the
@@ -312,8 +358,8 @@ func TestE2EFailoverOverRealBinary(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (should fail over from the 503 node)", resp.StatusCode)
 		}
-		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
-			t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header", got)
 		}
 		if gotBody != body {
 			t.Errorf("healthy upstream got body %q, want the original request body %q", gotBody, body)

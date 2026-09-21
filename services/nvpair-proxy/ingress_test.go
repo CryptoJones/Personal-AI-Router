@@ -52,29 +52,24 @@ func TestHandlePlainRejectsNonLoopback(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("non-loopback plaintext status = %d, want %d", rec.Code, http.StatusForbidden)
 	}
-	// The refusal carries CORS so a browser client reads this 403 and its reason
-	// instead of an opaque "CORS error" that hides why the call failed.
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("Access-Control-Allow-Origin = %q, want * on the refusal", got)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header on the refusal", got)
 	}
 }
 
-// TestHandlePlainAnswersPreflightBeforeLoopbackGate: the preflight is answered
-// even for a caller the gate will refuse. It authorizes nothing — the request
-// that follows is still rejected — but without it the browser never sends that
-// request and reports the refusal as a generic CORS failure.
-func TestHandlePlainAnswersPreflightBeforeLoopbackGate(t *testing.T) {
+// Preflight is subject to the same ingress gate as ordinary requests.
+func TestHandlePlainRejectsPreflightAtLoopbackGate(t *testing.T) {
 	p := testProxy(anyProfile(t), NewDiscovery(), 11435)
 	req := httptest.NewRequest(http.MethodOptions, "/api/generate", nil)
 	req.RemoteAddr = "192.0.2.50:40000"
 	rec := httptest.NewRecorder()
 
 	p.soleFacade().handlePlain(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("preflight status = %d, want %d", rec.Code, http.StatusNoContent)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("preflight status = %d, want %d", rec.Code, http.StatusForbidden)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header", got)
 	}
 }
 

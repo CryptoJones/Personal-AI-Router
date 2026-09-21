@@ -159,6 +159,14 @@ const SKIPPED_PATHS = [
     ['scripts/collectlogs/testdata/', 'log fixtures the sanitizer tests compare byte for byte'],
 ]
 
+// Go writes a failing fuzz input to <pkg>/testdata/fuzz/<FuzzTarget>/<hash> and
+// reads it back verbatim: the first line is a format version and the rest are
+// typed literals, so a header would stop the seed from parsing. Matched on the
+// path segment rather than added to SKIPPED_PATHS above because the entries are
+// named by content hash — no extension or filename rule can describe them, and a
+// rooted prefix would need repeating for every package that gains a fuzz target.
+const FUZZ_CORPUS = /(^|\/)testdata\/fuzz\//
+
 const LICENSE_TAG = /SPDX-License-Identifier:[ \t]*(\S+)/
 const COPYRIGHT_TAG = /SPDX-FileCopyrightText:[ \t]*(.+)/
 const COPYRIGHT_TEXT = /^Copyright \(c\) \d{4}(?:-\d{4})? (.+)$/
@@ -168,6 +176,7 @@ function classify(path) {
     for (const [prefix, reason] of SKIPPED_PATHS) {
         if (path === prefix || path.startsWith(prefix)) return { skip: reason }
     }
+    if (FUZZ_CORPUS.test(path)) return { skip: 'Go fuzz corpus entry, parsed verbatim by the fuzzing engine' }
 
     const name = path.slice(path.lastIndexOf('/') + 1)
     const dot = name.lastIndexOf('.')

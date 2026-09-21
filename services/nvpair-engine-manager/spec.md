@@ -10,8 +10,18 @@ A declarative, config-driven control plane for **local inference engines** (Olla
 
 ## 2. Scope
 **In scope**
+- Broker-coordinated argument/server/proxy settings, literal argument
+  persistence, ownership validation and pinned peer settings synchronization.
+  The normative operation and failure contract is
+  [ENGINE_SETTINGS.md](../nvpair-ui-broker/ENGINE_SETTINGS.md); launch grammar is
+  [LAUNCH_TEXT.md](LAUNCH_TEXT.md).
 - Detect installation; **user-mode** install (HTTPS download + checksum-verify-when-pinned + run) per OS/arch.
 - Lifecycle: start (with readiness probe), stop, restart, status, periodic health.
+- Persistent server-port changes preserve arguments, environment and unrelated
+  manifest overrides. Resetting to the bundled port removes only shared and
+  host-platform port overrides, deleting the file only when it has no other
+  settings. Host-platform precedence must not override a successfully saved port
+  on reload; malformed existing overrides fail the save and remain intact.
 - Config-declared **actions** covering the full model lifecycle — Ollama: `list_models`, `loaded_models`, `pull_model`, `run_model`, `unload_model`, `delete_model`; LM Studio: `list_models`/`list_downloaded`, `loaded_models`, `pull_model`, `load_model`, `chat`, `unload_model`, `delete_model` (`remove_path` with `lms-disk-path` resolution) — mapped to each engine's local control API. `loaded_models` reports the models currently resident in memory (Ollama `GET /api/ps`, LM Studio `GET /api/v1/models` filtered by nonempty `loaded_instances`), name-extracted via the same declarative `result` spec (with an optional `match` row filter).
 - Per-engine stdout/stderr log capture and structured operational error records, surfaced via the errors pipeline.
 - A normalized node-level model list (`engine:models`): union of every running engine's `list_models`, name-extracted via each action's declarative `result` spec, plus the per-engine set of models loaded in memory (`loadedByEngine`, from each engine's `loaded_models` action). A successful explicit empty inventory remains an engine key with `[]`; a missing/malformed/failed inventory omits that engine key instead of being mislabeled as authoritative empty. A watcher polls the loaded set and pushes `engine:models-changed` when it changes (explicit load/unload, JIT auto-load, TTL/idle eviction).

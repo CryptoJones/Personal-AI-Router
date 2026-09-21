@@ -3,15 +3,7 @@
 
 package main
 
-// Baseline coverage for the Ollama proxy-port paths that had none.
-//
-// resolveProxyPort, handleProxySetPort and the unmanaged branch of
-// reconcileProxyPortOnReady were reachable only through code no test drove:
-// the two existing reconcile tests store managedOllamaFacade=true first, so
-// they return before the unmanaged branch, and nothing referenced the set-port
-// handler at all. Those are precisely the paths the proxy unification
-// generalizes onto LM Studio, so they need assertions that fail if the
-// generalization changes them.
+// Coverage for automatic facade preparation, bind recovery, and ownership gates.
 
 import (
 	"context"
@@ -25,7 +17,6 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
-	"nvpair-shared/errors"
 )
 
 // brokerWithRunningEngines answers one engine:get-installed with the given
@@ -99,63 +90,6 @@ func awaitErrorsNotification(t *testing.T, seen <-chan *Message, method string) 
 			t.Fatalf("no %s notification arrived", method)
 			return nil
 		}
-	}
-}
-
-// A running engine owns its port, so a proxy asked for that port is moved to
-// the next free one and the move is surfaced as a sticky warning.
-func TestResolveProxyPortBumpsPastRunningEngine(t *testing.T) {
-	b := brokerWithRunningEngines(t, 11434)
-	seen := observeErrors(t, b)
-
-	if got := b.resolveProxyPort(11434); got != 11435 {
-		t.Fatalf("resolveProxyPort(11434) = %d, want 11435", got)
-	}
-
-	msg := awaitErrorsNotification(t, seen, methodErrorsReport)
-	if !strings.Contains(string(msg.Params), proxyPortBumpedID) {
-		t.Fatalf("warning did not carry %s: %s", proxyPortBumpedID, msg.Params)
-	}
-	var reported struct {
-		Severity string `json:"severity"`
-		Action   string `json:"action"`
-	}
-	if err := json.Unmarshal(msg.Params, &reported); err != nil {
-		t.Fatal(err)
-	}
-	if reported.Severity != "warning" || reported.Action != "none" {
-		t.Fatalf("severity/action = %q/%q, want warning/none", reported.Severity, reported.Action)
-	}
-}
-
-// A request that collides with nothing clears any warning a previous bump
-// left, so the notice cannot outlive the conflict that produced it.
-func TestResolveProxyPortClearsStaleBumpWarning(t *testing.T) {
-	b := brokerWithRunningEngines(t)
-	seen := observeErrors(t, b)
-
-	if got := b.resolveProxyPort(11500); got != 11500 {
-		t.Fatalf("resolveProxyPort(11500) = %d, want it unchanged", got)
-	}
-
-	msg := awaitErrorsNotification(t, seen, methodErrorsClear)
-	var cleared errors.ClearParams
-	if err := json.Unmarshal(msg.Params, &cleared); err != nil {
-		t.Fatal(err)
-	}
-	if cleared.ID != proxyPortBumpedID {
-		t.Fatalf("cleared id = %q, want %q", cleared.ID, proxyPortBumpedID)
-	}
-}
-
-// Managed mode overrides the request entirely: the proxy owns the facade port,
-// so no bump warning applies.
-func TestResolveProxyPortForcesFacadeWhenManaged(t *testing.T) {
-	b := brokerWithRunningEngines(t)
-	b.ollamaState().managedFacade.Store(true)
-
-	if got := b.resolveProxyPort(9999); got != managedOllamaFacadePort {
-		t.Fatalf("resolveProxyPort under managed mode = %d, want %d", got, managedOllamaFacadePort)
 	}
 }
 
@@ -428,53 +362,6 @@ func TestFacadeEnableRejectionIsNotRetried(t *testing.T) {
 	case extra := <-attempts:
 		t.Fatalf("a second enable was sent for %+v; a rejection must not be retried", extra)
 	case <-time.After(200 * time.Millisecond):
-	}
-}
-
-// LM Studio's set-port used to relay verbatim, so a user could park its proxy
-// on a port a running engine already held and hear nothing about it. Both
-// engines now resolve the request the same way, and the warning names the
-// engine so two proxies bumping cannot produce one indistinguishable notice.
-func TestBothProxiesResolveSetPortAgainstRunningEngines(t *testing.T) {
-	for _, tc := range []struct {
-		engine    string
-		requested int
-		want      int
-	}{
-		{engine: "ollama", requested: 11434, want: 11435},
-		{engine: "lmstudio", requested: 1234, want: 1235},
-	} {
-		t.Run(tc.engine, func(t *testing.T) {
-			profile, ok := engineProxyProfileFor(tc.engine)
-			if !ok {
-				t.Fatalf("no profile for %s", tc.engine)
-			}
-			b := brokerWithRunningEngines(t, tc.requested)
-			seen := observeErrors(t, b)
-
-			if got := b.resolveEngineProxyPort(profile, tc.requested); got != tc.want {
-				t.Fatalf("resolveEngineProxyPort(%d) = %d, want %d", tc.requested, got, tc.want)
-			}
-
-			msg := awaitErrorsNotification(t, seen, methodErrorsReport)
-			if !strings.Contains(string(msg.Params), profile.portBumpedID()) {
-				t.Fatalf("warning did not carry %s: %s", profile.portBumpedID(), msg.Params)
-			}
-			if !strings.Contains(string(msg.Params), profile.DisplayName) {
-				t.Fatalf("warning does not name the engine: %s", msg.Params)
-			}
-		})
-	}
-}
-
-// A managed facade is not negotiable: the request is answered with the facade
-// port and any stale bump warning is cleared, for either engine.
-func TestManagedFacadeOverridesRequestedProxyPort(t *testing.T) {
-	b := brokerWithRunningEngines(t)
-	b.lmstudioState().managedFacade.Store(true)
-
-	if got := b.resolveEngineProxyPort(lmstudioProxyProfile, 4321); got != managedLMStudioFacadePort {
-		t.Fatalf("resolveEngineProxyPort = %d, want the managed facade %d", got, managedLMStudioFacadePort)
 	}
 }
 

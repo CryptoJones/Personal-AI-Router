@@ -16,10 +16,18 @@
 - none ✅
 
 ### Requests the backend handles but the bridge never calls (unused capability)
+- ⚠️ nvpair-engine-manager → engine:configure-launch
+- ⚠️ nvpair-engine-manager → engine:configured-ports
 - ⚠️ nvpair-engine-manager → engine:describe
 - ⚠️ nvpair-engine-manager → engine:errors
+- ⚠️ nvpair-engine-manager → engine:get-launch
 - ⚠️ nvpair-engine-manager → engine:logs
+- ⚠️ nvpair-engine-manager → engine:preview-launch
+- ⚠️ nvpair-engine-manager → engine:remote-apply-settings
+- ⚠️ nvpair-engine-manager → engine:remote-get-settings
+- ⚠️ nvpair-engine-manager → engine:remote-preview-settings
 - ⚠️ nvpair-engine-manager → engine:restart
+- ⚠️ nvpair-engine-manager → engine:set-port
 - ⚠️ nvpair-engine-manager → internal:set-reserved-port
 - ⚠️ nvpair-job-scheduler → scheduler:get-interval
 - ⚠️ nvpair-job-scheduler → scheduler:get-status
@@ -34,6 +42,8 @@
 - ⚠️ nvpair-proxy → node/selected
 - ⚠️ nvpair-proxy → node/set-local-backend
 - ⚠️ nvpair-ui-broker → discovery:unsubscribe
+- ⚠️ nvpair-ui-broker → engine:configure-launch
+- ⚠️ nvpair-ui-broker → engine:set-port
 - ⚠️ nvpair-ui-broker → engine:set-reserved-port
 - ⚠️ nvpair-ui-broker → engine:unsubscribe
 - ⚠️ nvpair-ui-broker → internal:set-reserved-port
@@ -41,6 +51,7 @@
 - ⚠️ nvpair-ui-broker → lmstudio-proxy:set-port
 - ⚠️ nvpair-ui-broker → lmstudio-proxy:unsubscribe
 - ⚠️ nvpair-ui-broker → ollama-proxy:get-status
+- ⚠️ nvpair-ui-broker → ollama-proxy:set-port
 - ⚠️ nvpair-ui-broker → ollama-proxy:unsubscribe
 - ⚠️ nvpair-ui-broker → workloads:unsubscribe
 
@@ -80,27 +91,36 @@
 | `engine:pull-progress` | notification (we consume) | ✅ yes |
 | `engine:ready` | notification (we consume) | ✅ yes |
 | `engine:remote-progress` | notification (we consume) | ✅ yes |
+| `engine:settings-changed` | notification (we consume) | ✅ yes |
+| `engine:settings-disconnected` | notification (we consume) | ✅ yes |
 | `engine:state-changed` | notification (we consume) | ✅ yes |
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `engine:action` | request (we call) | ✅ yes |
+| `engine:configure-launch` | request (we call) | ⚠️ not called |
+| `engine:configured-ports` | request (we call) | ⚠️ not called |
 | `engine:describe` | request (we call) | ⚠️ not called |
 | `engine:errors` | request (we call) | ⚠️ not called |
 | `engine:get-installed` | request (we call) | ✅ yes |
+| `engine:get-launch` | request (we call) | ⚠️ not called |
 | `engine:install` | request (we call) | ✅ yes |
 | `engine:logs` | request (we call) | ⚠️ not called |
 | `engine:models` | request (we call) | ✅ yes |
 | `engine:prepare-shutdown` | request (we call) | ✅ yes |
+| `engine:preview-launch` | request (we call) | ⚠️ not called |
+| `engine:remote-apply-settings` | request (we call) | ⚠️ not called |
 | `engine:remote-delete-model` | request (we call) | ✅ yes |
 | `engine:remote-get-installed` | request (we call) | ✅ yes |
+| `engine:remote-get-settings` | request (we call) | ⚠️ not called |
 | `engine:remote-install` | request (we call) | ✅ yes |
 | `engine:remote-load-model` | request (we call) | ✅ yes |
+| `engine:remote-preview-settings` | request (we call) | ⚠️ not called |
 | `engine:remote-pull-model` | request (we call) | ✅ yes |
 | `engine:remote-start` | request (we call) | ✅ yes |
 | `engine:remote-stop` | request (we call) | ✅ yes |
 | `engine:remote-unload-model` | request (we call) | ✅ yes |
 | `engine:restart` | request (we call) | ⚠️ not called |
-| `engine:set-port` | request (we call) | ✅ yes |
+| `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:start` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |
 | `engine:stop` | request (we call) | ✅ yes |
@@ -227,19 +247,26 @@
 | `app:ready` | notification (we consume) | ✅ yes |
 | `discovery:nodes-changed` | notification (we consume) | ✅ yes |
 | `engine:restore-enabled` | notification (we consume) | ➖ ignored |
+| `engine:settings-changed` | notification (we consume) | ✅ yes |
+| `engine:settings-projection` | notification (we consume) | ➖ ignored |
+| `engine:settings-reply` | notification (we consume) | ➖ ignored |
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `errors:update` | notification (we consume) | ✅ yes |
 | `lmstudio-proxy:ready` | notification (we consume) | ➖ ignored |
-| `ollama-proxy:ready` | notification (we consume) | ✅ yes |
+| `ollama-proxy:ready` | notification (we consume) | ➖ ignored |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
 | `connection/cluster-auto-sync` | request (we call) | ➖ ignored |
 | `connection/cluster-identity` | request (we call) | ✅ yes |
 | `discovery:get-nodes` | request (we call) | ✅ yes |
 | `discovery:subscribe` | request (we call) | ✅ yes |
 | `discovery:unsubscribe` | request (we call) | ⚠️ not called |
+| `engine:apply-settings` | request (we call) | ✅ yes |
+| `engine:configure-launch` | request (we call) | ⚠️ not called |
+| `engine:get-settings` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
-| `engine:set-port` | request (we call) | ✅ yes |
+| `engine:preview-settings` | request (we call) | ✅ yes |
+| `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:set-reserved-port` | request (we call) | ⚠️ not called |
 | `engine:start` | request (we call) | ✅ yes |
 | `engine:subscribe` | request (we call) | ✅ yes |
@@ -257,7 +284,7 @@
 | `node/updated` | request (we call) | ✅ yes |
 | `nodes/list` | request (we call) | ✅ yes |
 | `ollama-proxy:get-status` | request (we call) | ⚠️ not called |
-| `ollama-proxy:set-port` | request (we call) | ✅ yes |
+| `ollama-proxy:set-port` | request (we call) | ⚠️ not called |
 | `ollama-proxy:subscribe` | request (we call) | ✅ yes |
 | `ollama-proxy:unsubscribe` | request (we call) | ⚠️ not called |
 | `ready` | request (we call) | ✅ yes |

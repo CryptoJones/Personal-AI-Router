@@ -33,7 +33,87 @@ bundled manifest so only `runtime.port` is pinned. (A standalone
 `LoadRegistry(dirs…)` load still replaces wholesale; the deep-merge applies to
 the per-user `engines/` override layer that the service overlays at startup.)
 
+Port changes merge only the port into an existing override. Returning to the
+bundled default removes shared and host-platform port overrides while keeping
+arguments, environment and unrelated settings. The file is removed only when
+the engine identifier is all that remains. A host-platform port override is
+updated too if needed, so it cannot shadow the saved shared port at startup.
+An invalid existing override is left intact and the save fails.
+
 ## Top-level fields
+
+For editable launch settings, `runtime.editable_launch` declares optional
+`fixed_args`, command-mode `start_index` (default zero), and `controls` that
+bind an engine's syntax to PAIR's policy fields. The bundled manifests reference
+[manifest.schema.json](manifest.schema.json) for editor validation. Engine-manager
+also validates bindings at load, including cross-control constraints that JSON
+Schema does not express. Unknown properties inside `editable_launch` are errors.
+
+```json
+"editable_launch": {
+  "fixed_args": ["server", "start"],
+  "controls": [
+    { "flags": ["--port", "-p"], "value": "{server.port}" },
+    { "flags": ["--bind"], "env": ["LMS_SERVER_HOST"], "value": "{server.host}" },
+    { "flags": ["--cors"], "value": "{cors.enabled}", "implicit": "true" }
+  ]
+}
+```
+
+| Control property | Meaning |
+| --- | --- |
+| `flags` | Supported flag spellings. The first is the canonical output name; the rest are aliases. |
+| `env` | Supported environment names. All share the same binding and validation. |
+| `value` | Format binding policy fields, with literal text between them. For example, `{server.host}:{server.port}` or `tcp://{server.host}:{server.port}`. |
+| `implicit` | Value supplied by flag presence, such as `true` for `--cors` or `false` for `--no-cors`. Omit for flags that consume a value. Environment sources always consume an explicit value. |
+
+PAIR has a small, fixed policy surface:
+
+| Field | Policy |
+| --- | --- |
+| `server.port` | Integer 1–65535, synchronized with the server-port field. |
+| `server.host` | Managed loopback host, keeping direct engine access behind the proxy. |
+| `cors.origins` | Comma-separated origin list, normalized and validated; changes are local-only. |
+| `cors.enabled` | Explicit boolean, normalized to `true` or `false`; changes are local-only. |
+
+The **proxy port belongs to the broker**, which creates that listener and validates
+port collisions. It is not an engine launch argument or an engine-manifest binding.
+The presence of a CORS field identifies a browser-policy control. Engines without
+one still work; proxies follow the engine's actual HTTP CORS response.
+
+The tokenizer reads flag/environment syntax, the binding parser extracts fields,
+and the field validators enforce policy. All input sources use the same conflict
+checks. Launch construction renders those same bindings, with no engine names,
+option-kind switches, or separate host:port parser. For example, Ollama uses
+`{"env":["OLLAMA_HOST"],"value":"{server.host}:{server.port}"}`.
+Bindings can reorder fields or add literal prefixes/brackets without Go changes.
+Templates are trusted manifest syntax; user values are never expanded as templates.
+
+Controls must collectively bind every managed server field. Fields within a value
+must be unique, separated by literal text, and share ownership: managed server
+fields cannot be combined with editable CORS fields. Unknown fields, malformed
+formats, duplicate source names and invalid implicit values fail loading.
+Implicit values cannot replace managed server fields. Every captured value still
+passes the field validator; a format cannot weaken port ranges or loopback policy.
+
+Managed values set every declared environment alias and, when assembling edited
+arguments, emit the canonical flag. This prevents inherited network aliases from
+overriding the managed values. Short value options accept separate, attached and
+equals forms. Ambiguous bundles containing a declared short control are rejected.
+A new engine using this grammar needs bindings and tests; a new CLI grammar needs
+a shared grammar extension, not an engine-specific branch.
+
+There is no catalog of unrelated vendor options or editable environment names.
+Those values pass through literally. Explicit environment assignments override
+manifest defaults; omitted defaults remain in effect. The final effective launch
+is validated again before execution, including settings saved by earlier versions.
+
+The editor saves literal extra arguments in
+host-platform `runtime.launch_args` and explicit environment assignments in
+`runtime.launch_env`, after trusted template expansion. Empty arrays clear the
+saved arguments or environment assignments. See [LAUNCH_TEXT.md](LAUNCH_TEXT.md) for validation
+and [the broker protocol](../nvpair-ui-broker/ENGINE_SETTINGS.md) for application
+and recovery. Editing `args`/`start` directly remains trusted manifest authoring.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|

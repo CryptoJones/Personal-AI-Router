@@ -26,9 +26,10 @@ import {
     type ProxyEngine
 } from './modular-state'
 import { emitBridgePush } from './broadcaster'
+import { parseEngineSettings } from './engine-settings'
 import { resolvePullCatchError } from './pull-error-handling'
 import { serviceLogLevel } from './service-log-level'
-import { engineManagerEngineName } from './empty-handlers'
+import { engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
 import { isFirstRun } from '@/electron/config/ui-config'
 import { parseClusterNodes, parseInvite, parseNodeIdentity } from './cluster-json'
 import { startNodeInfoPoller, stopNodeInfoPoller } from './node-info-poller'
@@ -291,16 +292,10 @@ function emptyLocalEngineBridge(): LocalEngineBridge {
     return { running: false, port: 0, bridgedId: '', bridgedPort: 0, selfWarned: false }
 }
 
-/** Translate our `EngineType` into the engine-manager's engine id. */
-function engineManagerId(engine: ProxyEngine): string {
-    return engine === 'lm-studio' ? 'lmstudio' : engine
-}
-
 /** Translate an engine-manager engine id into a proxy engine, or null. */
 function proxyEngineFromManagerId(id: string): ProxyEngine | null {
-    if (id === 'ollama') return 'ollama'
-    if (id === 'lmstudio') return 'lm-studio'
-    return null
+    const engine = engineTypeFromManagerName(id)
+    return engine && isProxyEngine(engine) ? engine : null
 }
 
 /** The broker relay namespace fronting an engine's reverse proxy. */
@@ -1156,7 +1151,7 @@ class ModularSupervisor {
             if (status.nodeId !== selfId) continue
             if (status.processStatus !== 'stopped' && status.processStatus !== 'running') continue
 
-            const engine = engineManagerEngineName(status.engineType)
+            const engine = engineManagerName(status.engineType)
             // A stopped engine will emit `engine:state-changed` on start, which
             // clears this optimistic op; a running engine's start is a backend
             // no-op (no state event), so we skip the op to avoid a stuck spinner —
@@ -1610,6 +1605,25 @@ class ModularSupervisor {
     }
 
     private handleEngineManagerNotification(notification: JsonRpcNotification): void {
+        if (notification.method === 'engine:settings-changed') {
+            try {
+                emitBridgePush('engines:settings-changed', parseEngineSettings(notification.params))
+            } catch {
+                /* Unsupported peer version. */
+            }
+            return
+        }
+        if (notification.method === 'engine:settings-disconnected') {
+            const params = notification.params
+            if (
+                params &&
+                typeof params === 'object' &&
+                !Array.isArray(params) &&
+                typeof params.nodeId === 'string'
+            )
+                emitBridgePush('engines:settings-disconnected', { nodeId: params.nodeId })
+            return
+        }
         if (notification.method === 'engine:ready') {
             void this.hydrateEngineManager()
             return
@@ -2035,7 +2049,7 @@ class ModularSupervisor {
         }
         const generation = this.beginModelRefresh(engine)
         this.callProcess('broker', 'engine:action', {
-            engine: engineManagerId(engine),
+            engine: engineManagerName(engine),
             action: 'list_models'
         })
             .then(result => {

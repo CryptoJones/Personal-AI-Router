@@ -409,7 +409,9 @@ func TestBrokerSpawnsAllModules(t *testing.T) {
 	_ = stdin
 	t.Cleanup(cleanup)
 
-	waitForMethod(t, msgs, "app:ready", 10*time.Second)
+	// Native engine detection and managed-port preparation run before ready.
+	// Allow those bounded probes to finish on a host with installed engines.
+	waitForMethod(t, msgs, "app:ready", 30*time.Second)
 
 	// Each supervised worker logs "<name> started" on spawn (before any
 	// bind), so these lines appear regardless of later port conflicts.

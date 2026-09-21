@@ -486,6 +486,19 @@ adopted engine keeps its own environment regardless. An engine that did offer a
 real cancellation API would change this calculus, and the claim should be
 revisited per engine rather than assumed to hold forever.
 
+### 5.8 Browser policy
+
+Each facade preserves its engine's CORS policy, including missing headers and
+permission denials. Ingress gates apply before preflight forwarding. Proxy errors
+grant no CORS permissions. Multi-target preflights intersect permissions from all
+responding engines without forwarding caller credentials; unavailable engines
+are skipped, and no responders yields 502. Preflights take no reservations.
+
+Model inventories with an Origin require agreement from every responding engine:
+a denial yields 403, an invalid inventory yields 502 without a partial list. An
+invalid-inventory error retains CORS headers only when all responding engines
+approve. See README.md for the complete forwarding and intersection rules.
+
 ## 6. Reservations
 
 A reservation is one in-flight dispatch this process has made since the last

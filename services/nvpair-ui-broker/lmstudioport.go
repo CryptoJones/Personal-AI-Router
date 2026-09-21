@@ -196,6 +196,9 @@ func (b *Broker) prepareManagedLMStudioFacade() {
 }
 
 func (b *Broker) prepareManagedLMStudioFacadeWithPortCheck(portAvailable func(int) bool) {
+	if b.prepareExplicitEngineSettings("lmstudio") {
+		return
+	}
 	// Ollama's facade is prepared first, so an inherited OLLAMA_HOST alias is
 	// already reserved here and must stay out of LM Studio's backend search.
 	portAvailable = b.availableOffOllamaHostAlias(portAvailable)
@@ -349,6 +352,21 @@ func (b *Broker) reconcileLMStudioProxyPortOnReady(boundPort int) {
 }
 
 func (b *Broker) reconcileLMStudioProxyPortOnReadyForGeneration(generation uint64, boundPort int) {
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	if b.loadEngineSettingsLocked() != nil {
+		if b.lmstudioProxyGeneration.Load() == generation {
+			b.markLMStudioPortReady()
+		}
+		return
+	}
+	if b.lmstudioProxyGeneration.Load() != generation {
+		return
+	}
+	if _, explicit := b.explicitEngineSettingsLocked("lmstudio"); explicit {
+		b.markLMStudioPortReady()
+		return
+	}
 	if b.lmstudioProxyGeneration.Load() != generation {
 		return
 	}

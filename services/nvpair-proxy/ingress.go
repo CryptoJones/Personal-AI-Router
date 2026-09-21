@@ -12,8 +12,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
-
-	"nvpair-shared/cors"
 )
 
 const engineIdentityProbeHeader = "X-NVPAIR-Engine-Identity-Probe"
@@ -80,13 +78,6 @@ func (f *facade) localBackendTarget() (*url.URL, bool) {
 // interfaces for the TLS personality, but plaintext is loopback-only).
 func (f *facade) handlePlain(w http.ResponseWriter, r *http.Request) {
 	if !isLoopbackRemote(r.RemoteAddr) {
-		// Answer a non-loopback preflight ahead of the gate. It grants no access
-		// on its own; the request that follows still receives the real 403. A
-		// loopback preflight continues into handleHTTP so an available engine's
-		// exact origin and credentials policy can be preserved.
-		if cors.WritePreflight(w, r) {
-			return
-		}
 		slog.Warn("rejected non-loopback plaintext request; cluster peers must use mTLS",
 			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
 		writeIngressError(w, http.StatusForbidden, "loopback-only",
@@ -167,12 +158,8 @@ func isLoopbackRemote(remoteAddr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// writeIngressError writes a small structured JSON error. It never echoes the
-// request body or any generated output. CORS headers are included because these
-// are the proxy's own rejections: without them a browser client cannot read the
-// status or reason, and every one of them looks like a generic CORS failure.
+// writeIngressError returns the actual failure without granting browser permissions.
 func writeIngressError(w http.ResponseWriter, status int, code, msg string) {
-	cors.Apply(w.Header())
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)

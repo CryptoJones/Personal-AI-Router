@@ -50,6 +50,9 @@ type facade struct {
 	// never mutated, so every read is safe without a lock.
 	profile engineProfile
 
+	// portMu serializes durable rebinds without blocking routing during storage I/O.
+	portMu sync.Mutex
+
 	// httpMu guards port, the servers, the split listener, and the listeners
 	// across a live set-port rebind. The HTTP handlers never read port (they
 	// route by upstream node), so the only contention is set-port vs set-port
@@ -750,19 +753,18 @@ func (f *facade) stopServing(ctx context.Context) {
 // naturally. A fresh `ready` notification announces the new port so the
 // orchestrator/UI learn where the proxy is now listening.
 // Only the listener swap runs under httpMu. Persisting the choice and
-// announcing it happen after the unlock, because every request takes this
+// announcing it happen outside that lock, because every request takes this
 // mutex through resolveCandidates: holding it across slow storage or a
 // backpressured stdout would stall all inference through this facade, and delay
 // teardown with it.
 func (f *facade) setPort(newPort int) error {
+	f.portMu.Lock()
+	defer f.portMu.Unlock()
 	swapped, err := f.swapListener(newPort)
 	if err != nil || !swapped {
 		return err
 	}
 
-	if err := savePersistedPort(f.profile, newPort); err != nil {
-		slog.Warn("failed to persist proxy port", "port", newPort, "err", err)
-	}
 	if err := f.notify("ready", ReadyParams{Version: Version, Port: newPort}); err != nil {
 		slog.Warn("failed to emit ready after rebind", "err", err)
 	}
@@ -771,18 +773,23 @@ func (f *facade) setPort(newPort int) error {
 
 // swapListener binds newPort and moves both personalities onto it, reporting
 // false when the facade was already there. The new listener is bound before the
-// old split closes, so a bind failure leaves the current one serving.
+// old split closes and persisted before the swap, so either failure leaves the
+// current listener serving. The caller holds portMu throughout the operation.
 func (f *facade) swapListener(newPort int) (bool, error) {
-	f.httpMu.Lock()
-	defer f.httpMu.Unlock()
-
-	if newPort == f.port {
-		return false, nil
+	port, _ := f.selfAddresses()
+	if newPort == port {
+		return false, savePersistedPort(f.profile, newPort)
 	}
 	newLn, err := net.Listen("tcp", fmt.Sprintf(":%d", newPort))
 	if err != nil {
 		return false, fmt.Errorf("failed to bind port %d: %w", newPort, err)
 	}
+	if err := savePersistedPort(f.profile, newPort); err != nil {
+		_ = newLn.Close()
+		return false, fmt.Errorf("persist proxy port: %w", err)
+	}
+	f.httpMu.Lock()
+	defer f.httpMu.Unlock()
 	oldSplit := f.split
 	f.port = newPort
 
