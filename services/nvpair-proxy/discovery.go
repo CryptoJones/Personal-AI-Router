@@ -102,6 +102,19 @@ func (d *Discovery) Nodes() []Node {
 	return out
 }
 
+// Has reports whether a node id is still present in either overlay. Used to
+// watch an in-flight request's target: a node that has dropped out of discovery
+// is not coming back to answer the attempt already sent to it.
+func (d *Discovery) Has(id string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if _, ok := d.subscribedNodes[id]; ok {
+		return true
+	}
+	_, ok := d.manualNodes[id]
+	return ok
+}
+
 // SetSubscribed replaces the relay-fed routing overlay with the given set and
 // reports what changed versus the previous set (keyed by node ID): nodes newly
 // present, nodes whose routable details changed, and nodes that dropped out. The

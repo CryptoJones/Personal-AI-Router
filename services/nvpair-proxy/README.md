@@ -201,6 +201,10 @@ the local machine is unaffected.
   proxy falls back to auto-select and emits `node/selection-changed`. A
   transport error or retryable status, including a model `404` from an
   advertised owner with stale inventory, steps to the next eligible owner.
+  Once a round's owners are used up, an inference request re-resolves and keeps
+  trying under a dispatch budget and a wall-clock deadline, and it commits to a
+  node at the first byte of response body rather than at its headers. `spec.md`
+  §5.1–§5.4 is normative for the bounds, the commit point, and the statuses.
 
 ### IPC Transport
 

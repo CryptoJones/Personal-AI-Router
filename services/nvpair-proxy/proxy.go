@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nvpair-shared/applog"
@@ -150,6 +151,7 @@ type RequestEvent struct {
 // workload:submitted (the proxy never queues — it forwards immediately) or
 // workloads:remove (retirement is a broker concern).
 const (
+	workloadSubmittedMethod = "workload:submitted"
 	workloadStartedMethod   = "workload:started"
 	workloadCompletedMethod = "workload:completed"
 	workloadErroredMethod   = "workload:errored"
@@ -189,6 +191,20 @@ type Workload struct {
 	CompletedAt    *int64  `json:"completedAt"`
 	Error          *string `json:"error"`
 	RequesterID    *string `json:"requesterId"`
+	// Seq counts this workload's events, from 1, in emission order.
+	//
+	// The workload-manager's inter-node dedup is a permanent set, so an event
+	// that repeats an earlier (state, scheduledOn) pair is indistinguishable
+	// from a redelivery and is dropped by every peer. The retry loop produces
+	// exactly that routinely: queued on A, placement cleared between attempts,
+	// then queued on A again. Peers kept the interim unplaced record while the
+	// job was running on A, so their schedulers stopped counting it against the
+	// node actually doing the work.
+	//
+	// Sequencing each event makes the dedup exact without weakening it: a
+	// broadcast retry resends an identical frame, sequence included, so a true
+	// redelivery is still suppressed.
+	Seq int64 `json:"seq"`
 }
 
 // workloadParams is the params envelope for a workload:* notification
@@ -503,6 +519,210 @@ func (p *Proxy) Run(ctx context.Context) error {
 	return err
 }
 
+// Retry bounds for a single inference request.
+//
+// The two are not redundant, because they bound different things. An attempt is
+// consumed by a dispatch, never by a resolution: finding no eligible owner
+// sends nothing, so maxDispatchAttempts governs dispatch failures while
+// jobDeadline governs the wait for an owner to exist at all — a wait that costs
+// no attempts and would otherwise be unbounded.
+//
+// Read only against dispatch failures the deadline looks unreachable, and the
+// arithmetic says so: five attempts at a 120s first-content cap plus 15s of
+// cumulative backoff span 615s, so every reschedule check before the last sees
+// a clock under 600s. It is not dead — it is the only bound on the no-owner
+// wait. Do not remove it as unreachable.
+const maxDispatchAttempts = 5
+
+// jobDeadline is a var (not a const) only so a test can shorten it; production
+// never reassigns it.
+var jobDeadline = 10 * time.Minute
+
+// targetWatchInterval is how often an in-flight attempt rechecks that its
+// target is still in discovery. It bounds detection latency only: the effect is
+// to replace a full first-content budget spent waiting on a node that is
+// already gone with a sub-second abort.
+//
+// A var (not a const) only so a test can shorten it; production never
+// reassigns it.
+var targetWatchInterval = 500 * time.Millisecond
+
+// defaultRetryBackoff is the delay before a retry, indexed by the number of
+// dispatches already made and clamped to the last entry. It also paces the poll
+// while no owner is available.
+var defaultRetryBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+
+// retryBackoff is the schedule in force. A var (not a const) only so a test can
+// shorten it; production never reassigns it. Naming the default separately lets
+// a test that asserts the schedule itself put the real one back.
+var retryBackoff = defaultRetryBackoff
+
+// backoffFor returns the delay before the next dispatch, jittered and never
+// longer than the time left before the deadline.
+func backoffFor(dispatches int, remaining time.Duration) time.Duration {
+	if len(retryBackoff) == 0 || remaining <= 0 {
+		return 0
+	}
+	i := dispatches - 1
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(retryBackoff) {
+		i = len(retryBackoff) - 1
+	}
+	d := retryBackoff[i]
+	// Jitter by up to ±25% so a burst of requests that all failed against the
+	// same node does not retry in lockstep and re-collide. The clock's
+	// nanosecond low bits are the entropy source: they differ between
+	// concurrent handlers, and `rand` here is crypto/rand, whose interface is
+	// far heavier than spreading a backoff warrants.
+	if spread := int64(d) / 2; spread > 0 {
+		d = time.Duration(int64(d) - spread/2 + time.Now().UnixNano()%(spread+1))
+	}
+	if d > remaining {
+		d = remaining
+	}
+	return d
+}
+
+// waitBeforeRetry sleeps d, reporting false if the request was abandoned while
+// waiting. A client that has gone away should not keep a retry budget alive:
+// nobody is left to receive the answer, so the remaining attempts are better
+// spent on work someone is waiting for.
+func waitBeforeRetry(ctx context.Context, d time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if d <= 0 {
+		return true
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// errFirstBodyTimeout is returned by awaitFirstBody when an upstream sent its
+// headers but produced no content within the budget.
+var errFirstBodyTimeout = stderrors.New("upstream sent no response body within the first-byte budget")
+
+// errTargetGone is the reason an attempt was abandoned because its target left
+// discovery. It replaces the bare "context canceled" the transport reports,
+// which in a log is indistinguishable from the client hanging up.
+var errTargetGone = stderrors.New("target node left discovery mid-request")
+
+// Attempt outcomes for attemptClaim.
+const (
+	attemptPending int32 = iota
+	attemptCommitted
+	attemptAbandoned
+)
+
+// attemptClaim resolves the race between committing an attempt and abandoning
+// it because its target left discovery.
+//
+// Both can become true at once: the watcher's discovery check can pass while
+// the commit path is already running, and between the first body byte arriving
+// and the commit finishing that path does a synchronous notification write and
+// takes two mutexes. A pair of channels cannot express which happened first —
+// closing one says an event occurred, not that it won — so the outcome is one
+// value that each side claims by compare-and-swap.
+//
+// Exactly one of commit and abandon succeeds, and callers must honor the
+// result: a false from commit means this attempt is being cancelled and must
+// not be served, and a false from abandon means the response is already
+// committed and must not be torn down.
+type attemptClaim struct {
+	state atomic.Int32
+}
+
+// commit claims the attempt for the response. Idempotent, so an already
+// committed attempt still reports true.
+func (a *attemptClaim) commit() bool {
+	return a.state.CompareAndSwap(attemptPending, attemptCommitted) ||
+		a.state.Load() == attemptCommitted
+}
+
+// abandon claims the attempt for cancellation, reporting false when the
+// response has already committed.
+//
+// A committed first byte wins on purpose. The byte is direct evidence that this
+// node is serving this request, whereas an absence from discovery can be a
+// transient announcement gap; cancelling then would truncate a working stream.
+func (a *attemptClaim) abandon() bool {
+	return a.state.CompareAndSwap(attemptPending, attemptAbandoned)
+}
+
+// settled reports whether either side has claimed the outcome.
+func (a *attemptClaim) settled() bool {
+	return a.state.Load() != attemptPending
+}
+
+// abandoned reports whether cancellation won.
+func (a *attemptClaim) abandoned() bool {
+	return a.state.Load() == attemptAbandoned
+}
+
+// bodyWithPeek re-attaches an already-read first byte ahead of the rest of an
+// upstream body, while keeping Close bound to the original so the connection
+// is still released.
+type bodyWithPeek struct {
+	io.Reader
+	io.Closer
+}
+
+// awaitFirstBody blocks until the upstream produces the first byte of its
+// response body, and returns that byte spliced back onto the front of the
+// stream.
+//
+// It exists because response headers are not a reliable signal that an engine
+// has started work, and the difference is engine-specific. LM Studio answers a
+// streaming request with 200 and headers ~12ms after accepting it and then
+// holds the connection open, silent, for the entire time the request waits
+// behind other work — measured at 128s behind a single-slot generation. Ollama
+// withholds headers until generation begins. Committing on headers therefore
+// meant that on LM Studio the proxy bound itself to a node that had merely
+// accepted the request: the header timeout could never fire, failover was
+// impossible, and a node dying during the wait took the job with it.
+//
+// The first content byte is the signal both engines agree on, and it is a real
+// one — no SSE keepalive or empty role delta arrives during the wait, so the
+// byte means generation actually started.
+//
+// A read that ends in EOF with no bytes is an empty body, which is a complete
+// (if unusual) response and commits. A genuine read error before any content
+// is retryable, like any other pre-commit upstream failure.
+func awaitFirstBody(body io.ReadCloser, budget time.Duration) (io.ReadCloser, error) {
+	type peeked struct {
+		b   []byte
+		err error
+	}
+	// Buffered so the reader goroutine can always finish. On the timeout path
+	// ReverseProxy closes resp.Body, which unblocks the pending Read.
+	ch := make(chan peeked, 1)
+	go func() {
+		var one [1]byte
+		n, err := body.Read(one[:])
+		ch <- peeked{b: one[:n], err: err}
+	}()
+
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case p := <-ch:
+		if len(p.b) == 0 && p.err != nil && !stderrors.Is(p.err, io.EOF) {
+			return nil, p.err
+		}
+		return bodyWithPeek{Reader: io.MultiReader(bytes.NewReader(p.b), body), Closer: body}, nil
+	case <-timer.C:
+		return nil, errFirstBodyTimeout
+	}
+}
+
 // Timeouts for upstream connections. Logged at startup so they're always
 // present in any captured log for post-mortem analysis.
 const (
@@ -531,6 +751,18 @@ const (
 // It is a var (not a const) only so a test can shorten it to exercise the
 // deadline against a real socket; production never reassigns it.
 var idleClientWriteTimeout = 30 * time.Second
+
+// firstBodyTimeout bounds how long awaitFirstBody waits for an engine to emit
+// its first content byte. It matches proxyResponseTimeout, the budget the
+// transport applies to headers, because from the caller's point of view the two
+// bound the same thing: how long we wait for a node to start the work. Keeping
+// it generous is deliberate — it also covers a cold model load, which is real
+// work rather than a stall, and which cannot be told apart from a queue wait
+// from outside the engine.
+//
+// It is a var (not a const) only so a test can shorten it; production never
+// reassigns it.
+var firstBodyTimeout = proxyResponseTimeout
 
 var modelListClient = &http.Client{
 	Transport: &http.Transport{
@@ -969,28 +1201,36 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		wl           *Workload
 	)
 
-	// Emit workload:started up front, the moment we begin forwarding, naming
-	// the first candidate we'll try. A burst of concurrent inference requests
-	// must surface as job cards immediately; the upstream engine serializes
-	// concurrent requests on a single GPU slot, so gating "started" on the
-	// upstream response headers (the commit point) left every queued-but-
-	// forwarded job invisible until the node dequeued it — only one card at a
-	// time (a prior regression). If failover later commits a different
-	// node, the commit block re-points scheduledOn; the terminal
-	// completed/errored transition is emitted once at the end regardless.
+	// wlSeq numbers this workload's events. Every mutation of wl below happens
+	// either before the watcher goroutine exists or under wlMu, so a plain
+	// counter is enough; see Workload.Seq for why the sequence is needed.
+	var wlSeq int64
+	nextWlSeq := func() int64 { wlSeq++; return wlSeq }
+
+	// Emit workload:submitted the moment the request is admitted, before any
+	// dispatch. A burst of concurrent inference requests must surface as job
+	// cards immediately — the upstream engine serializes work on a single GPU
+	// slot, so a card that waited for the upstream response would leave every
+	// queued job invisible until the node dequeued it, one at a time (a prior
+	// regression). "queued" is what makes that visible without claiming the
+	// engine is generating, which only becomes true at the commit point below.
+	//
+	// scheduledOn is left empty here: nothing has been dispatched yet, and the
+	// scheduler counts pending work by scheduledOn, so naming a node we have
+	// not tried would inflate its load. Each dispatch and each gap between
+	// attempts re-points it.
 	if isInf && model != "" {
 		createdMs := start.UnixMilli()
 		wl = &Workload{
-			ID:          reqID,
-			Model:       model,
-			Engine:      f.profile.Name,
-			RunID:       p.runID,
-			State:       "running",
-			ScheduledOn: candidates[0].id,
-			CreatedAt:   createdMs,
-			StartedAt:   &createdMs,
+			ID:        reqID,
+			Model:     model,
+			Engine:    f.profile.Name,
+			RunID:     p.runID,
+			State:     "queued",
+			CreatedAt: createdMs,
+			Seq:       nextWlSeq(),
 		}
-		p.emitWorkload(workloadStartedMethod, *wl)
+		p.emitWorkload(workloadSubmittedMethod, *wl)
 	}
 
 	// The terminal workload transition (completed/errored) can be reached from
@@ -1017,8 +1257,14 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			if errMsg != "" {
 				wl.Error = &errMsg
 			}
+			wl.Seq = nextWlSeq()
 			snapshot := *wl
 			wlMu.Unlock()
+			// Only "completed" gets its own method; every other terminal state,
+			// including "cancelled", rides workload:errored. The workload
+			// manager does not validate method against state and consumers read
+			// the state out of the payload, so a new terminal state needs no new
+			// method on the wire.
 			method := workloadCompletedMethod
 			if state != "completed" {
 				method = workloadErroredMethod
@@ -1043,7 +1289,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			select {
 			case <-reqCtx.Done():
-				emitTerminal("failed", "client disconnected before completion")
+				emitTerminal("cancelled", "client disconnected before completion")
 			case <-finished:
 			}
 		}()
@@ -1051,21 +1297,313 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// committedSC is the statusCapture of the candidate we committed to
 	// streaming; its wroteErr tells us after the fact whether the client write
-	// failed (dead/half-open client) so we can mark the workload failed.
+	// failed (dead/half-open client) so we can mark the workload failed. It is
+	// assigned at the commit point as well as after the loop, because the
+	// post-loop assignment does not always run — see finalize below.
 	var committedSC *statusCapture
 
-	// Failover loop: try candidates in order until one returns a
-	// usable response or the list is exhausted. We can only retry before the
-	// first byte reaches the client; once a response starts streaming we're
-	// committed. proxy/request-started fires at that commit point so it names
-	// the node that actually serves the request, not one we failed over from;
-	// workload:started was already emitted above (and is re-pointed there on a
-	// failover). The self-forward guard lives in resolveCandidates.
-	for i := range candidates {
-		cand := candidates[i]
-		last := i == len(candidates)-1
+	// finalize reports this request's outcome, and it is deferred because a
+	// mid-copy error is never returned to us: ReverseProxy converts one into
+	// panic(http.ErrAbortHandler) whenever it detects a real server, and that
+	// panic unwinds straight past the end of this function. Reported inline,
+	// both the terminal workload event and the proxy/request completion were
+	// lost whenever an upstream died mid-stream while the client was healthy,
+	// leaving the job "running" for the life of the broker. That is worse than
+	// a stuck card: the scheduler counts queued and running by scheduledOn, so
+	// the ghost permanently inflated that node's pending count and biased
+	// routing away from a node whose only fault was a crashed engine.
+	//
+	// Client-side failures never had this problem. net/http cancels the
+	// request context synchronously before a write error propagates
+	// (checkConnErrorWriter), so the watcher above has always emitted by the
+	// time the panic arrives. The upstream-died case is the one that had no
+	// reporter at all.
+	//
+	// Registered after the reservation release above, so on unwind this runs
+	// first and the node is still counted as loaded while we report.
+	defer func() {
+		aborted := recover()
+		// An aborted copy is operational detail, not a verdict on the job. A
+		// stream that already committed a 2xx is a completion whether or not
+		// it reached its end, so this never feeds the terminal state below,
+		// and proxyErr is left untouched for that reason.
+		reportErr := proxyErr
+		if aborted != nil && reportErr == "" {
+			reportErr = "upstream stream aborted mid-response"
+		}
+		if committedSC != nil && finalStatus == 0 {
+			// The panic skipped the post-loop assignment, but the committed
+			// capture still carries the status the upstream sent.
+			finalStatus = committedSC.status
+		}
+
+		slog.Debug("proxy request complete",
+			"id", reqID,
+			"node_id", servedNodeID,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"target", servedTarget,
+			"status", finalStatus,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"ttfb_ms", ttfbMs,
+			"err", reportErr,
+		)
+
+		_ = f.notify("proxy/request", RequestEvent{
+			ID:       reqID,
+			NodeID:   servedNodeID,
+			Method:   r.Method,
+			Path:     r.URL.Path,
+			Target:   servedTarget,
+			Status:   finalStatus,
+			Duration: time.Since(start).Milliseconds(),
+			TTFB:     ttfbMs,
+			Error:    reportErr,
+		})
+
+		// Terminal workload transition pairs with the workload:started emitted
+		// at forward time above. Cancellation, an upstream/transport error, a
+		// failed client write (dead/half-open client), or any non-2xx status is
+		// a failure; a clean 2xx is a completion. The Workload carries the same
+		// id so the broker (and peers) can collapse the start/finish pair.
+		// Routed through emitTerminal so the disconnect watcher and this path
+		// emit exactly once.
+		if wl != nil {
+			switch {
+			case r.Context().Err() != nil:
+				// The request was cancelled before it finished — either the
+				// client disconnected or, on shutdown, we cancelled it to stop
+				// the in-flight inference. A mid-stream cancel never reaches
+				// ErrorHandler (the 200 headers are already sent), so without
+				// this branch it would be misreported as completed. (The
+				// watcher above usually beats us to it; emitTerminal makes that
+				// a no-op.) Cancelled rather than failed: nothing went wrong
+				// here, the requester stopped waiting.
+				emitTerminal("cancelled", "request cancelled before completion")
+			case committedSC != nil && committedSC.wroteErr != nil:
+				// The response committed but a write to (or flush toward) the
+				// client failed — typically the idle deadline tripping on a
+				// dead/half-open client. The same event as the branch above,
+				// differing only in how we noticed: a client that vanished
+				// without a FIN never cancels the context, so the write
+				// deadline is what surfaces it. Classified identically.
+				emitTerminal("cancelled", "client connection lost: "+committedSC.wroteErr.Error())
+			case proxyErr != "" || finalStatus >= http.StatusBadRequest:
+				msg := proxyErr
+				if msg == "" {
+					msg = fmt.Sprintf("upstream returned HTTP %d", finalStatus)
+				}
+				emitTerminal("failed", msg)
+			default:
+				emitTerminal("completed", "")
+			}
+		}
+
+		if aborted != nil {
+			// Preserve ReverseProxy's contract with http.Server, which recovers
+			// ErrAbortHandler silently and closes the connection. Swallowing it
+			// here would leave the client waiting on a response that will never
+			// be finished or closed.
+			panic(aborted)
+		}
+	}()
+
+	// repointWorkload records where the job is currently placed: a node id while
+	// an attempt is in flight, empty between attempts. The scheduler counts
+	// pending work by scheduledOn, so clearing it is what stops a node we have
+	// given up on from still looking busy. The state stays "queued" throughout,
+	// because "running" means the engine is generating and the broker's store
+	// would reject a return to "queued" as a backwards transition.
+	repointWorkload := func(nodeID string) {
+		if wl == nil {
+			return
+		}
+		wlMu.Lock()
+		if terminated || wl.ScheduledOn == nodeID {
+			wlMu.Unlock()
+			return
+		}
+		wl.ScheduledOn = nodeID
+		wl.Seq = nextWlSeq()
+		snapshot := *wl
+		wlMu.Unlock()
+		p.emitWorkload(workloadSubmittedMethod, snapshot)
+	}
+
+	// releaseHeld drops the capacity claim. Called before every backoff: the
+	// reservation map is process-wide and shared with the other engine's
+	// facade, so holding a claim on a node we have stopped using would push
+	// that engine's traffic away from a node that is in fact free. It is the
+	// same reasoning as clearing scheduledOn, applied to the proxy's own
+	// estimate rather than the scheduler's.
+	releaseHeld := func() {
+		resMu.Lock()
+		defer resMu.Unlock()
+		p.releaseReservation(held)
+		held = reservation{}
+	}
+	// takeHeld re-reserves for a fresh round, replacing any claim still held.
+	// reserveCandidate both orders the round and takes the claim, so a retry
+	// that re-resolves has to go back through it.
+	takeHeld := func(cands []candidate) []candidate {
+		resMu.Lock()
+		defer resMu.Unlock()
+		p.releaseReservation(held)
+		var out []candidate
+		out, held = p.reserveCandidate(f, cands)
+		return out
+	}
+
+	// Retry loop. Each iteration dispatches to one candidate; when a round's
+	// candidates are exhausted it backs off and re-resolves, so a node that
+	// recovered or a model that finished pulling becomes eligible mid-retry.
+	//
+	// Bounded by maxDispatchAttempts for dispatch failures and by jobDeadline
+	// for the whole pre-commit life. Both bounds are checked before every
+	// dispatch — the deadline never truncates an attempt already in flight,
+	// because killing one seconds from its first token and then failing the job
+	// for being out of time would spend the entire wait and discard the result.
+	//
+	// Retrying is only possible before the first byte reaches the client; past
+	// the commit point we are bound to that node, and a stream truncated from
+	// there is the caller's to resume. proxy/request-started fires at the commit
+	// so it names the node that actually served. The self-forward guard lives in
+	// resolveCandidates.
+	// The budget is for inference only. Everything not in the engine's route
+	// table is forwarded verbatim, and some of those are state-changing: a
+	// POST /api/pull starts a model download. shouldRetry treats any 5xx as
+	// retryable regardless of route, so without this split a failed pull would
+	// be replayed up to five times — including against the node that just took
+	// the work, since re-resolution can pick it again.
+	//
+	// Non-inference therefore gets one pass over the resolved candidates: no
+	// re-resolution, no backoff, no deadline.
+	maxDispatches := maxDispatchAttempts
+	retryRounds := true
+	if !isInf {
+		maxDispatches = len(candidates)
+		retryRounds = false
+	}
+
+	deadline := start.Add(jobDeadline)
+	dispatches := 0
+	committed := false
+	respondedWithError := false
+	round := candidates
+	next := 0
+
+	for !committed {
+		if dispatches >= maxDispatches {
+			break
+		}
+		if retryRounds && !time.Now().Before(deadline) {
+			break
+		}
+		// Abandon-now: the requester has gone, so there is nobody left to
+		// receive an answer and the remaining attempts are better spent on work
+		// someone is waiting for. The watcher has already emitted the terminal
+		// as cancelled; the guard on the exhaustion response below keeps this
+		// from also inventing a reason for a client that stopped listening.
+		if r.Context().Err() != nil {
+			break
+		}
+		if next >= len(round) {
+			if !retryRounds {
+				// Single pass: the candidate list is the whole budget.
+				break
+			}
+			// Round exhausted, or no owner was available. Either way the job is
+			// on no node right now, so drop both the placement and the capacity
+			// claim before waiting.
+			repointWorkload("")
+			releaseHeld()
+			if !waitBeforeRetry(r.Context(), backoffFor(dispatches, time.Until(deadline))) {
+				break
+			}
+			round = f.resolveCandidates(routingModel)
+			if isInf && model != "" {
+				round = takeHeld(round)
+			}
+			next = 0
+			if len(round) == 0 {
+				// Every owner went away mid-flight. Not a rejection: keep
+				// waiting for one to come back. This consumes no attempt, which
+				// is why jobDeadline is the only bound on it.
+				continue
+			}
+		}
+		cand := round[next]
+		next++
+		dispatches++
+		// lastPermitted means no further dispatch can happen, so this attempt's
+		// failure is the client's answer. It is not "last candidate in the
+		// round" any more: another round may follow.
+		lastPermitted := dispatches >= maxDispatches ||
+			(retryRounds && !time.Now().Before(deadline))
+		last := lastPermitted
+		repointWorkload(cand.id)
+		// The claim follows the node we are about to try, not the one
+		// reserveCandidate happened to pick for the round — an attempt can hold
+		// a node for the whole first-content budget, and for that time it is
+		// the node under load. A same-node move is a no-op.
+		moveHeld(cand.id)
+
+		// Each attempt runs on its own context, a child of the request's, so we
+		// can abandon this dispatch without touching the request itself. The
+		// distinction is load-bearing: the disconnect watcher and the terminal
+		// classification both read r.Context(), the parent, so cancelling a
+		// child cannot be mistaken for the client going away.
+		attemptCtx, cancelAttempt := context.WithCancel(r.Context())
+		// claim decides, once, whether this attempt commits or is abandoned;
+		// see attemptClaim for why a pair of channels could not.
+		claim := &attemptClaim{}
+
+		// Watch the target while the attempt is pre-commit. A node that has
+		// dropped out of discovery is not coming back to answer a request
+		// already sent to it, and without this the attempt sat out the whole
+		// first-content budget before failing over — while the broker had
+		// already stamped the record failed from its own node-loss sweep, so
+		// the UI said failed while the client still waited.
+		//
+		// Polling rather than subscribing keeps this out of Discovery's
+		// contract, and the interval only bounds detection latency. Watching
+		// stops at the commit point, because cancelling after that would kill a
+		// stream that is working.
+		//
+		// Read the interval once, on this goroutine: the watcher must not
+		// depend on a value that could change under it mid-attempt.
+		watchEvery := targetWatchInterval
+		go func() {
+			t := time.NewTicker(watchEvery)
+			defer t.Stop()
+			for {
+				select {
+				case <-attemptCtx.Done():
+					return
+				case <-t.C:
+					// The commit path may have claimed the outcome since the
+					// last tick, in which case this attempt is no longer ours
+					// to cancel.
+					if claim.settled() {
+						return
+					}
+					if f.discovery.Has(cand.id) {
+						continue
+					}
+					if claim.abandon() {
+						cancelAttempt()
+					}
+					return
+				}
+			}
+		}()
+
+		// ReverseProxy derives the outbound request from the one it is given,
+		// so the attempt context has to travel on a copy. The replayed body
+		// goes on the copy for the same reason.
+		attemptReq := r.WithContext(attemptCtx)
 		if bodyBytes != nil {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			attemptReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 		retry := false
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
@@ -1088,6 +1626,65 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 					// calls ErrorHandler with our sentinel, then we try next.
 					retry = true
 					return retrySignal{}
+				}
+				// Hold the commit until the engine actually produces content.
+				// Only for inference: a control endpoint's headers mean what
+				// they say, and the model-list fan-out has its own client.
+				// Waiting here costs a non-streaming response nothing, since
+				// its headers and body arrive together, so the request's own
+				// stream flag never has to be consulted — which also avoids
+				// guessing per-dialect defaults (Ollama streams by default,
+				// the OpenAI routes do not).
+				var peeked io.ReadCloser
+				if isInf {
+					body, err := awaitFirstBody(resp.Body, firstBodyTimeout)
+					if err != nil {
+						// This response must not commit, whether or not another
+						// attempt is permitted. awaitFirstBody's reader is still
+						// blocked on resp.Body, so committing would put two
+						// readers on one stream — the peek could swallow a byte
+						// the client never sees — and against a silent upstream
+						// the copy would then block with nothing left to
+						// interrupt it, hanging the request past every bound we
+						// set.
+						//
+						// Returning an error is what releases that reader:
+						// ReverseProxy closes resp.Body and calls ErrorHandler.
+						proxyErr = err.Error()
+						if !last {
+							retry = true
+							slog.Warn("proxy upstream produced no content, failing over",
+								"id", reqID, "node_id", cand.id, "target", cand.url.Host,
+								"path", r.URL.Path, "err", err)
+							return retrySignal{}
+						}
+						slog.Warn("proxy upstream produced no content, retries exhausted",
+							"id", reqID, "node_id", cand.id, "target", cand.url.Host,
+							"method", r.Method, "path", r.URL.Path,
+							"duration_ms", time.Since(start).Milliseconds(), "err", err)
+						return err
+					}
+					peeked = body
+				}
+				// Claim the attempt before any commit side effect. Losing the
+				// claim means the watcher has already cancelled this attempt,
+				// so committing would stream through a context that is about to
+				// die and truncate the response we just started.
+				if !claim.commit() {
+					proxyErr = errTargetGone.Error()
+					if !last {
+						retry = true
+						slog.Warn("proxy target left discovery as the response committed, failing over",
+							"id", reqID, "node_id", cand.id, "target", cand.url.Host,
+							"path", r.URL.Path)
+						return retrySignal{}
+					}
+					return errTargetGone
+				}
+				// The peeked byte goes back only once the commit is ours, so a
+				// lost claim leaves the body untouched for ReverseProxy to close.
+				if peeked != nil {
+					resp.Body = peeked
 				}
 				// Prefer an engine-declared preflight policy so an exact origin plus
 				// Allow-Credentials can pass a credentialed browser fetch. Engines
@@ -1125,21 +1722,31 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 						Path:   r.URL.Path,
 						Target: cand.url.Host,
 					})
-					// workload:started was already emitted up front naming the
-					// first candidate. If failover landed us on a different
-					// node, re-point scheduledOn so the card — and the terminal
-					// completed/errored event, which carries the same wl — name
-					// the node that actually served. Guarded by wlMu against the
-					// disconnect watcher, and skipped once terminated so a late
-					// re-point can't resurrect a workload we've already failed.
-					// Move the capacity claim to the node that actually served,
-					// for the same reason: the node that refused the request is
-					// not doing the work and must not keep counting as loaded.
+					// The claim already follows each dispatch, so this is a
+					// no-op unless something reordered underneath us; it stays
+					// as the belt-and-braces guarantee that the node that
+					// actually served is the one counted as loaded.
 					moveHeld(cand.id)
+					// Record the commit here, not just after the loop: a copy
+					// error aborts this handler by panic, and finalize needs to
+					// know the response had committed (and on which capture) to
+					// classify it.
+					committedSC = sc
+					// queued -> running: the engine is producing content, so
+					// this is the first moment "running" is true. It also fixes
+					// the placement on the node that actually served, which may
+					// differ from the last node the queued updates named.
+					// Guarded by wlMu against the disconnect watcher, and
+					// skipped once terminated so a late transition cannot
+					// resurrect a workload we have already finalized.
 					if wl != nil {
 						wlMu.Lock()
-						if !terminated && wl.ScheduledOn != cand.id {
+						if !terminated {
+							startedMs := time.Now().UnixMilli()
+							wl.State = "running"
+							wl.StartedAt = &startedMs
 							wl.ScheduledOn = cand.id
+							wl.Seq = nextWlSeq()
 							snapshot := *wl
 							wlMu.Unlock()
 							p.emitWorkload(workloadStartedMethod, snapshot)
@@ -1169,7 +1776,8 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 						"path", r.URL.Path, "err", err)
 					return
 				}
-				// Last candidate failed at the transport: terminal, surface it.
+				// No further dispatch is permitted: terminal, surface it.
+				respondedWithError = true
 				servedNodeID = cand.id
 				servedTarget = cand.url.Host
 				if cors.WritePreflight(ew, r) {
@@ -1177,7 +1785,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				proxyErr = err.Error()
-				slog.Warn("proxy upstream error, candidates exhausted",
+				slog.Warn("proxy upstream error, retries exhausted",
 					"id", reqID, "node_id", cand.id, "target", cand.url.Host,
 					"method", r.Method, "path", r.URL.Path,
 					"duration_ms", time.Since(start).Milliseconds(), "err", err)
@@ -1187,79 +1795,79 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				if mErr != nil {
 					body = []byte(`{"error":"upstream error"}`)
 				}
+				// A node that answered but never produced content timed out
+				// rather than failed to be reached, and 504 says so.
+				status := http.StatusBadGateway
+				if stderrors.Is(err, errFirstBodyTimeout) {
+					status = http.StatusGatewayTimeout
+				}
 				cors.Apply(ew.Header())
 				ew.Header().Set("Content-Type", "application/json")
 				ew.Header().Set("X-Content-Type-Options", "nosniff")
-				ew.WriteHeader(http.StatusBadGateway)
+				ew.WriteHeader(status)
 				ew.Write(body)
 			},
 		}
 
-		proxy.ServeHTTP(sc, r)
+		proxy.ServeHTTP(sc, attemptReq)
+		cancelAttempt()
+		if claim.abandoned() {
+			// Name the real reason rather than the bare "context canceled" the
+			// transport reports, which reads identically to a client hangup.
+			proxyErr = errTargetGone.Error()
+		}
 		if !retry {
 			finalStatus = sc.status
 			committedSC = sc
-			break
+			committed = true
 		}
 	}
 
-	slog.Debug("proxy request complete",
-		"id", reqID,
-		"node_id", servedNodeID,
-		"method", r.Method,
-		"path", r.URL.Path,
-		"target", servedTarget,
-		"status", finalStatus,
-		"duration_ms", time.Since(start).Milliseconds(),
-		"ttfb_ms", ttfbMs,
-		"err", proxyErr,
-	)
-
-	_ = f.notify("proxy/request", RequestEvent{
-		ID:       reqID,
-		NodeID:   servedNodeID,
-		Method:   r.Method,
-		Path:     r.URL.Path,
-		Target:   servedTarget,
-		Status:   finalStatus,
-		Duration: time.Since(start).Milliseconds(),
-		TTFB:     ttfbMs,
-		Error:    proxyErr,
-	})
-
-	// Terminal workload transition pairs with the workload:started emitted at
-	// the commit point above. Cancellation, an upstream/transport error, a
-	// failed client write (dead/half-open client), or any non-2xx status is a
-	// failure; a clean 2xx is a completion. The Workload carries the same id so
-	// the broker (and peers) can collapse the start/finish pair. Routed through
-	// emitTerminal so the disconnect watcher and this path emit exactly once.
-	if wl != nil {
+	// Nothing committed and no attempt wrote the client's answer, so the loop
+	// ended between attempts: either the budget ran out or, more usually, every
+	// owner went away and none came back before the deadline. The dispatch
+	// paths answer for themselves — a final transport failure writes its own
+	// 502 and a non-retryable status is passed through — so this is the only
+	// outcome left without a response.
+	//
+	// An abandoned request is excluded: writing to a client that has gone
+	// achieves nothing, and attributing its end to a missing node would be a
+	// fabricated reason for something that was the requester's own choice.
+	if !committed && !respondedWithError && r.Context().Err() == nil {
+		// Name what the loop was actually doing when it ran out, which is what
+		// the caller needs to know. The three cases are distinguishable: the
+		// budget is gone; or the deadline passed while an owner was still there
+		// to try, because slow attempts can reach 10 minutes before they reach
+		// five dispatches; or the deadline passed with the candidate set empty,
+		// which is the wait for an owner to come back.
+		reason := "no node advertising the requested model became available before the retry deadline"
 		switch {
-		case r.Context().Err() != nil:
-			// The request was cancelled before it finished — either the
-			// client disconnected or, on shutdown, we cancelled it to stop
-			// the in-flight inference. A mid-stream cancel never reaches
-			// ErrorHandler (the 200 headers are already sent), so without this
-			// branch it would be misreported as completed. (The watcher above
-			// usually beats us to it; emitTerminal makes that a no-op.)
-			emitTerminal("failed", "request cancelled before completion")
-		case committedSC != nil && committedSC.wroteErr != nil:
-			// The response committed but a write to (or flush toward) the
-			// client failed — typically the idle deadline tripping on a
-			// dead/half-open client. The stream is truncated, so this is a
-			// failure, not the completion the 200 status would otherwise
-			// suggest.
-			emitTerminal("failed", "client connection lost: "+committedSC.wroteErr.Error())
-		case proxyErr != "" || finalStatus >= http.StatusBadRequest:
-			msg := proxyErr
-			if msg == "" {
-				msg = fmt.Sprintf("upstream returned HTTP %d", finalStatus)
-			}
-			emitTerminal("failed", msg)
-		default:
-			emitTerminal("completed", "")
+		case dispatches >= maxDispatches:
+			reason = "every dispatch attempt failed"
+		case len(round) > 0:
+			reason = "the retry deadline passed while dispatch attempts were still failing"
 		}
+		proxyErr = reason
+		finalStatus = http.StatusServiceUnavailable
+		slog.Warn("proxy request exhausted its retry budget",
+			"id", reqID, "method", r.Method, "path", r.URL.Path,
+			"dispatches", dispatches, "duration_ms", time.Since(start).Milliseconds(),
+			"reason", reason)
+		body, mErr := json.Marshal(map[string]string{"error": reason})
+		if mErr != nil {
+			body = []byte(`{"error":"retry budget exhausted"}`)
+		}
+		cors.Apply(w.Header())
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// Advisory only: the caller knows its own patience better than we do.
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write(body)
 	}
+
+	// Reporting happens in the deferred finalize above, so it survives the
+	// ErrAbortHandler panic that a mid-copy error raises.
 }
 
 // resolveCandidates returns the ordered list of nodes to try for the current

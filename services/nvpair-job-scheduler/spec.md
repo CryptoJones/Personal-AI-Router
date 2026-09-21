@@ -112,9 +112,10 @@ capacity, model locality, latency, and affinity can grow later behind the same
   `scheduler:set-interval`, clamped to a **200 ms** floor (§7.5).
   Workload and discovery events do not wait for this timer; emit-only-on-snapshot-
   change plus the stable tie-break keep timer recomputes from churning.
-- **Pending-count (decided — node-wide).** *Pending* = `queued` or `running`
-  (`completed`/`failed` excluded; `initializing` never transmitted), regardless of
-  engine. Counted by **`scheduledOn`** (where work runs), not `originatedFrom`. A
+- **Pending-count (decided — node-wide).** *Pending* = `queued` or `running`,
+  regardless of engine. The test is an allow-list, not a terminal-state
+  exclusion list, so `completed`, `failed`, `cancelled`, and any state added
+  later count as zero load without needing a change here. Counted by **`scheduledOn`** (where work runs), not `originatedFrom`. A
   workload with no `scheduledOn` is unplaced and counts toward no node.
 - **Identity alignment (decided).** Discovery `hostUuid`, proxy candidate ids, and
   workload `scheduledOn` use the same stable UUID namespace. A malformed or legacy

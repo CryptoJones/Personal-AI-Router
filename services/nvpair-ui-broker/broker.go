@@ -1011,7 +1011,12 @@ func stateReplayMethod(state string) string {
 		return "workload:started"
 	case "completed":
 		return "workload:completed"
-	case "failed":
+	// "cancelled" rides workload:errored, the same frame the proxy emits it on:
+	// the manager does not validate method against state, and consumers read
+	// the state out of the payload. Every state the store can hold has to
+	// appear here, because an omitted one is silently left out of the replay
+	// and drops off the manager's re-sync set across a supervised restart.
+	case "failed", "cancelled":
 		return "workload:errored"
 	default:
 		return ""

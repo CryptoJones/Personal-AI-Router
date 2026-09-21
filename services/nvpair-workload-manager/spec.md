@@ -27,18 +27,18 @@ Tracks inference workloads cluster-wide as they are queued, executed, and retire
 
 ## 3. Key Use Cases
 - **Broadcast a local event**: the Broker emits a `workload:*` lifecycle event (`workload:submitted`, `workload:started`, `workload:completed`, `workload:errored`) or `workloads:remove` on `stdin`; the Workload Manager broadcasts it to every discovered peer via `POST /v1/workloads/events` over mTLS.
-- **Relay a remote event**: on receiving a peer's `workload:*`, validate and deduplicate (by `(nodeId, Workload.id, state)`), then emit `workloads:upsert` on `stdout` so the Broker updates its catalog. A peer `workloads:remove` (deduplicated by `(nodeId, workloadId)`) is relayed as `workloads:remove` on `stdout`.
+- **Relay a remote event**: on receiving a peer's `workload:*`, validate and deduplicate (by `(nodeId, engine, runId, Workload.id, state, scheduledOn, seq)`), then emit `workloads:upsert` on `stdout` so the Broker updates its catalog. A peer `workloads:remove` (deduplicated by `(nodeId, workloadId)`) is relayed as `workloads:remove` on `stdout`.
 - **Discover peers**: the Broker registers this node's `wl` port with the `nvpair-node-scanner` discovery daemon, which carries it on this node's single consolidated record; the Workload Manager subscribes for `wl` nodes and rebuilds the target set from each `discovery:nodes` snapshot the Broker relays, so a node joins the set when it appears in a snapshot and leaves when it is absent from the next one.
-- **Edge case — duplicate / re-broadcast events**: retries or re-broadcasts arriving more than once are deduplicated (`(nodeId, Workload.id, state)` for lifecycle, `(nodeId, workloadId)` for removals) so the Broker is updated at most once.
+- **Edge case — duplicate / re-broadcast events**: retries or re-broadcasts arriving more than once are deduplicated (`(nodeId, engine, runId, Workload.id, state, scheduledOn, seq)` for lifecycle, `(nodeId, workloadId)` for removals) so the Broker is updated at most once.
 - **Edge case — peer unreachable**: a target that is down, slow, or partitioned (crash, network split, laptop suspend) does not block others — broadcast runs concurrently with per-peer timeouts and bounded retries.
 
 ## 4. Open Questions / Risks
-- **`initializing` state (open — needs third-party feedback)**: the enum value has no `workload:*` method, so it is never produced or transmitted as specified. Pending the Broker/inference-proxy team's confirmation whether it is a Broker-local pre-queue state only, or needs a new lifecycle method and broadcast path.
+- **`initializing` state (closed)**: removed. It had no `workload:*` method and nothing ever produced it, so it was an unreachable member of a closed enum. The proxy has no distinct pre-dispatch moment to represent — admission and the first dispatch are effectively simultaneous — so the value was deleted rather than given a method.
 - **`EngineType` values (open — needs third-party feedback)**: the valid `engine` set is undefined. Pending the inference-engine team's list, `engine` is treated as an opaque pass-through string (must be present and non-empty, value not validated).
 - **Risk — late joiners / no replay**: nodes discovered mid-session only get events broadcast after they appear in the target set; their view is incomplete until later events flow (by design).
 - **Risk — best-effort fan-out**: an unreachable peer misses events; temporary inconsistency until later events arrive or the Broker reconciles by timestamp.
 - **Risk — snapshot staleness**: the target set is only as current as the last `discovery:nodes` snapshot, so a departed node lingers as a target and a new node appears slowly, bounded by the discovery daemon's own liveness handling rather than by anything this service controls.
-- **Risk — dedup granularity**: keying on `(nodeId, Workload.id, state)` means a re-broadcast with the same key but updated metadata (e.g. a corrected `error`) is dropped, not merged.
+- **Risk — dedup granularity**: the key is `(nodeId, engine, runId, Workload.id, state, scheduledOn, seq)`, so a re-broadcast carrying the same key with updated metadata (e.g. a corrected `error`) is dropped, not merged. `seq` is the producer's event counter and is what makes the key exact, because this index is a permanent set: any key derived only from a workload's current shape collides as soon as the workload revisits a shape it already had, which a retry does routinely (queued on A, placement cleared between attempts, queued on A again). Without it peers dropped that third event, kept the interim unplaced record, and stopped counting an active job against the node running it.
 
 ## 5. Requirements
 
@@ -46,7 +46,7 @@ Tracks inference workloads cluster-wide as they are queued, executed, and retire
 - Accept local `workload:*` and `workloads:remove` notifications from the Broker over `stdin` (or a named pipe) and broadcast each to all discovered peers via `POST /v1/workloads/events`.
 - For each validated, deduplicated inter-node `workload:*`, emit `workloads:upsert` to the Broker (translated, not forwarded unchanged); for each inter-node `workloads:remove`, emit `workloads:remove` to the Broker (not re-broadcast).
 - Subscribe to the Broker's discovery relay with `discovery:subscribe` filtered to the `wl` service, and rebuild the broadcast target set from every `discovery:nodes` snapshot: take each peer's dialable address and `wl` port from its directory entry, skip entries advertising no `wl` port or no address, and exclude this node's own entry by `hostUuid` rather than by hostname. A snapshot carries the full filtered set and replaces the target set wholesale, so there are no per-node deltas to apply and a peer absent from a snapshot simply stops being a target.
-- Deduplicate inbound lifecycle events by `(nodeId, Workload.id, state)` and removals by `(nodeId, workloadId)`, using a configurable bounded LRU index (default ~10,000 entries, sized for session-scoped volume at ~dozen-node scale). `nodeId` is part of the key because `Workload.id` is only unique per node (§11) — keying on `id` alone would collide across nodes and silently drop a legitimate peer's event. This matches the `(nodeId, workloadId)` tuple the Broker uses as the global workload identity (§10).
+- Deduplicate inbound lifecycle events by `(nodeId, engine, runId, Workload.id, state, scheduledOn, seq)` and removals by `(nodeId, workloadId)`, using a configurable bounded LRU index (default ~10,000 entries, sized for session-scoped volume at ~dozen-node scale). `nodeId` is part of the key because `Workload.id` is only unique per node (§11) — keying on `id` alone would collide across nodes and silently drop a legitimate peer's event. `engine` and `runId` are there for the same reason one level down: `Workload.id` is a per-process counter, both engine proxies count from 1, and the counter resets on restart, so without them a concurrent Ollama and LM Studio job both holding id `"1"` would collapse into one. The client-visible identity the Broker uses as the global key remains the coarser `(nodeId, workloadId)` pair (§10); this key is finer on purpose.
 - Validate inbound payloads; reject malformed envelopes or unknown `method` values (`400 Bad Request`).
 
 **Non-functional**
@@ -66,6 +66,8 @@ Tracks inference workloads cluster-wide as they are queued, executed, and retire
   model: string
   engine: EngineType
   state: WorkloadState
+  runId?: string          // Producing process's nonce, minted at proxy startup. Optional/additive (§7.3). Part of the dedup key: `id` is a per-process counter, both engine proxies count from 1, and it resets on restart, so runId is what keeps a reused id from colliding with an older workload. Absent from a producer that does not stamp it, in which case dedup degrades to a coarser key.
+  seq?: number            // Producer's event counter for this workload, from 1, in emission order. Optional/additive (§7.3). Part of the dedup key, and the component that makes it exact: the index is a permanent set, so any key derived only from a workload's current shape collides when the workload revisits a shape it already had (a retry re-dispatching to a node it already tried). Absent from a producer that does not stamp it, in which case dedup degrades to shape-only and such a repeat is dropped as a duplicate.
   originatedFrom: string  // Owner/origin node of the workload (its identity half of the (originatedFrom, id) global key). Distinct from scheduledOn, the node it was routed to.
   scheduledOn?: string  // Node the workload was routed to / scheduled on (where it actually ran), as opposed to originatedFrom (where it came from). Supplied by the Broker/proxy and passed through opaquely. Optional/additive (§7.3) — absent until a target is chosen (e.g. a still-queued workload:submitted).
   createdAt: number
@@ -76,10 +78,18 @@ Tracks inference workloads cluster-wide as they are queued, executed, and retire
 }
 ```
 
-`WorkloadState` (enum): `"initializing" | "queued" | "running" | "completed" | "failed"`
-- Method → `state`: `workload:submitted` → `queued`, `workload:started` → `running`, `workload:completed` → `completed`, `workload:errored` → `failed`. `initializing` is a pre-queue state with no lifecycle method and is not transmitted (see §4).
+`WorkloadState` (enum): `"queued" | "running" | "completed" | "failed" | "cancelled"`
+- Method → `state`: `workload:submitted` → `queued`, `workload:started` → `running`, `workload:completed` → `completed`, `workload:errored` → `failed` or `cancelled`.
+- `cancelled` is terminal and means the requester stopped waiting — a disconnected client, a dead client whose write deadline tripped, or an in-flight request cancelled by the producer's own shutdown. It rides `workload:errored` rather than having a method of its own, because state is not validated against the method that carried it and consumers read `state` from the payload. Keeping it distinct from `failed` is what lets a consumer's failed bucket mean "an outcome someone might act on" instead of also collecting every time a user pressed stop.
 
-Validation: check every inbound envelope before processing. Inter-node and local interfaces both accept the four `workload:*` methods (with `params.workloadInfo`) and `workloads:remove` (with `params.workloadId`). Reject malformed/unknown-`method` payloads on the inter-node interface (`400`); drop-and-log on the local interface (never broadcast). Deduplicate inter-node lifecycle by `(nodeId, Workload.id, state)` and removals by `(nodeId, workloadId)`. Assume the Broker supplies well-formed notifications with epoch-millisecond timestamps.
+Validation: check every inbound envelope before processing. A `Workload` must
+carry `id`, `model`, `engine`, `state`, and `originatedFrom`; `runId`, `seq`,
+and `scheduledOn` are optional/additive, and the timestamp and nullable fields
+are passed through opaquely. Note the asymmetry with the dedup key: `runId` and
+`seq` are part of that key but are not required, so a producer that omits them
+is accepted and simply gets coarser deduplication rather than a rejection.
+Inter-node and local interfaces both accept the four `workload:*` methods (with
+`params.workloadInfo`) and `workloads:remove` (with `params.workloadId`). Reject malformed/unknown-`method` payloads on the inter-node interface (`400`); drop-and-log on the local interface (never broadcast). Deduplicate inter-node lifecycle by `(nodeId, engine, runId, Workload.id, state, scheduledOn, seq)` and removals by `(nodeId, workloadId)`. Assume the Broker supplies well-formed notifications with epoch-millisecond timestamps.
 
 **Outputs** — to the Broker over `stdout` / named pipe, or to peers via HTTP REST. `workloads:upsert` on `stdout` after a remote `workload:*`; `workloads:remove` on `stdout` after a remote inter-node `workloads:remove`. Inter-node broadcast posts the same JSON-RPC notification to `POST /v1/workloads/events` (`200 OK` on success; see §7.2). No response on the local interface (notifications only); `stdout` writes are serialized so frames never interleave; inter-node delivery is best-effort (concurrent, per-peer timeouts, bounded retries).
 
@@ -115,7 +125,10 @@ Example `workloads:upsert` (`stdout`):
       "model": "llama-3-70b",
       "engine": "trt-llm",
       "state": "running",
+      "runId": "9f3c1a7b",
+      "seq": 3,
       "originatedFrom": "node-B",
+      "scheduledOn": "node-C",
       "createdAt": 1716998400000,
       "startedAt": 1716998401000,
       "completedAt": null,
@@ -159,6 +172,8 @@ Example notification:
       "model": "llama-3-70b",
       "engine": "trt-llm",
       "state": "queued",
+      "runId": "9f3c1a7b",
+      "seq": 1,
       "originatedFrom": "node-A",
       "createdAt": 1716998400000,
       "startedAt": null,
@@ -177,7 +192,7 @@ Example notification:
 - A node broadcasts each local `workload:*` and `workloads:remove` to all discovered peers.
 - Body: JSON-RPC 2.0 notification — `workload:*` with `params.workloadInfo`, or `workloads:remove` with `params.workloadId` (and optional `params.originatedFrom`).
 - Responses: `200 OK` (accepted; lifecycle → `workloads:upsert`, removal → `workloads:remove` to the local Broker); `400 Bad Request` (malformed / unknown `method`); `403 Forbidden` (client cert absent or untrusted).
-- Idempotency: lifecycle by `(nodeId, Workload.id, state)`; removal by `(nodeId, workloadId)`.
+- Idempotency: lifecycle by `(nodeId, engine, runId, Workload.id, state, scheduledOn, seq)`; removal by `(nodeId, workloadId)`.
 
 Example request (`POST /v1/workloads/events`):
 ```json
@@ -239,7 +254,7 @@ Response: `200 OK`.
 - **Peer unreachable/slow during broadcast** (partition, crash, suspend, GC pause): that peer's Broker misses the event, causing temporary inconsistency. → Concurrent broadcast with per-peer timeouts so one peer can't block others or the local Broker; bounded exponential-backoff retries, drop after max attempts with a metric/alert; peers reconcile via later events.
 - **Connection exhaustion under burst** (observed in the field): a per-event connection makes every lifecycle event pay a full mTLS handshake, and an unreaped idle connection pins a descriptor for the process lifetime. At inference-burst rates this starves the sender and the receiving listener until handshakes fail outright, and the events lost are disproportionately terminal ones — which the ~two-interval terminal retention cannot recover once the window passes. → Pool connections per peer with a bound on both total and idle connections per host, reap idle connections on both ends (§7.2), and drain response bodies so a connection is actually reusable. Note the residual: fan-out concurrency itself is still per-event, so a heartbeat round with many active workloads issues many simultaneous requests per peer.
 - **mTLS handshake failure / untrusted or expired cert**: that peer is isolated from broadcasts (`403`). → Reject and log with the presented identity; monitor and alert ahead of cert expiry; keep the trust store hot-reloadable so rotations apply without restart.
-- **Duplicate / re-broadcast events**: the Broker could see the same transition repeatedly, corrupting counts/state. → Deduplicate by `(nodeId, Workload.id, state)` (removals by `(nodeId, workloadId)`) before emitting, so the Broker updates at most once.
+- **Duplicate / re-broadcast events**: the Broker could see the same transition repeatedly, corrupting counts/state. → Deduplicate by `(nodeId, engine, runId, Workload.id, state, scheduledOn, seq)` (removals by `(nodeId, workloadId)`) before emitting, so the Broker updates at most once.
 - **Malformed payload / unknown `method`**: could crash the parser or propagate garbage. → Validate every envelope; reject (`400`) inter-node or drop-and-log locally; never forward unvalidated payloads.
 - **Local interface severed** (Broker exited → `stdin` EOF / `stdout` `EPIPE` / `ERROR_BROKEN_PIPE`): an orphaned manager would accept peer events with nowhere to forward them. → Treat EOF/`EPIPE` as the shutdown signal: stop the listener and exit cleanly. No reconnect/buffering — a new Broker spawns a new (stateless) manager. The small load lets the OS pipe buffer absorb serialized `stdout` writes.
 - **Out-of-order delivery for the same workload (local)**: the Broker could see an inconsistent progression (e.g. `completed` before `started`). → Serialize `stdout` writes; the Broker orders per workload via `(nodeId, workloadId)` (monotonic IDs) and timestamps.

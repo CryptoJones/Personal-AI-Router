@@ -152,7 +152,7 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 
 // TestWorkloadManagerRehydratesActiveWorkloadOnRestart drives the rehydration
 // path end-to-end. A proxied inference is held open by a blocking fake engine,
-// so its workload stays "running" (workload:started is emitted up front). The
+// so its workload reaches "running" once the engine emits its first byte. The
 // supervised workload-manager is then killed; the broker's supervisor respawns
 // it and replays the still-active local workload. A discovered stub peer must
 // hear the running workload AGAIN from the restarted manager — which only
@@ -162,20 +162,32 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 		t.Skip("ollama-proxy default port 11435 already in use; skipping")
 	}
 
-	// Fake Ollama that accepts the request then blocks, keeping the proxied
-	// inference in-flight so the workload never reaches a terminal state. The
+	// Fake Ollama that starts a streaming response, flushes one chunk so the
+	// proxy commits and the workload becomes "running", then blocks — keeping
+	// the proxied inference in-flight so it never reaches a terminal state. The
 	// handler also unblocks if the request is cancelled, so a client-side abort
 	// can't wedge it.
+	//
+	// The chunk is required: the proxy commits on the first byte of response
+	// body, not on the headers, because headers only prove an engine accepted
+	// the request. An engine that blocks before producing content leaves the
+	// workload "queued", which is the truth but not what this test is about.
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	stopEngine := func() { releaseOnce.Do(func() { close(release) }) }
 	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"message":{"role":"assistant","content":""},"done":false}`+"\n")
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
 		select {
 		case <-release:
 		case <-r.Context().Done():
 		}
-		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"done":true}`+"\n")
 	}))
 	// Defer order matters: stopEngine() must run BEFORE ollama.Close(), because
 	// Close() blocks until the deliberately-held request finishes, which only
