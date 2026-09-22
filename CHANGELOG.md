@@ -11,6 +11,10 @@ published releases on GitHub.
 Builds from this repository are unsigned and configure no update feed, so
 automatic updates are unavailable in them.
 
+## 0.1.2 — fix(mdns): send responses from UDP 5353 (GitHub Issue #1) (#102)
+
+- Discovery traffic now originates from UDP 5353, allowing standards-compliant mDNS peers and network reflectors to accept PAIR node records.
+
 ## 0.1.1
 
 ### Fixed
