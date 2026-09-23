@@ -206,10 +206,11 @@ func TestHandlePlainInsideAllowedCIDRIsRouted(t *testing.T) {
 	}
 }
 
-// TestHandlePlainPreflightStillAnsweredWhenEnabled: a browser sends no
-// Authorization on a preflight, so the 204 must keep preceding the credential
-// check once the gate is on.
-func TestHandlePlainPreflightStillAnsweredWhenEnabled(t *testing.T) {
+// TestHandlePlainPreflightReachesEngineWhenEnabled: a browser sends no
+// Authorization on a preflight, so once the gate is on a keyless LAN preflight
+// must not be refused with 401; it is answered from the engine's own CORS
+// policy, as a loopback preflight is.
+func TestHandlePlainPreflightReachesEngineWhenEnabled(t *testing.T) {
 	f, seen := lanProxy(t)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
@@ -219,11 +220,11 @@ func TestHandlePlainPreflightStillAnsweredWhenEnabled(t *testing.T) {
 	req.Header.Set("Access-Control-Request-Headers", "Authorization")
 	f.handlePlain(rec, req)
 
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("LAN preflight status = %d, want 204", rec.Code)
+	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+		t.Fatalf("LAN preflight status = %d, want the engine's answer", rec.Code)
 	}
-	if seen.Load() != nil {
-		t.Fatal("a preflight reached the engine")
+	if seen.Load() == nil {
+		t.Fatal("the preflight never reached the engine's CORS policy")
 	}
 }
 
@@ -247,8 +248,8 @@ func TestHandlePlainGateWithoutKeysKeepsLoopbackOnly(t *testing.T) {
 }
 
 // TestHandlePlainPreflightOutsideAllowedCIDRIs403: the allowlist applies to a
-// preflight too. A source the operator excluded gets no 204 that would let a
-// browser proceed to the request that follows.
+// preflight too. A source the operator excluded gets no CORS answer that would
+// let a browser proceed to the request that follows.
 func TestHandlePlainPreflightOutsideAllowedCIDRIs403(t *testing.T) {
 	f, seen := lanProxy(t, netip.MustParsePrefix("10.0.0.0/8"))
 	rec := httptest.NewRecorder()
@@ -269,17 +270,20 @@ func TestHandlePlainPreflightOutsideAllowedCIDRIs403(t *testing.T) {
 	}
 }
 
-// TestHandlePlainPreflightInsideAllowedCIDRIs204: inside the allowlist the
-// preflight is still answered without a credential, as browsers require.
-func TestHandlePlainPreflightInsideAllowedCIDRIs204(t *testing.T) {
-	f, _ := lanProxy(t, netip.MustParsePrefix("192.0.2.0/24"))
+// TestHandlePlainPreflightInsideAllowedCIDRReachesEngine: inside the allowlist
+// the preflight is still answered without a credential, as browsers require.
+func TestHandlePlainPreflightInsideAllowedCIDRReachesEngine(t *testing.T) {
+	f, seen := lanProxy(t, netip.MustParsePrefix("192.0.2.0/24"))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
 	req.RemoteAddr = lanRemote
 	req.Header.Set("Origin", "http://app.test")
 	req.Header.Set("Access-Control-Request-Method", "POST")
 	f.handlePlain(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("in-allowlist preflight status = %d, want 204", rec.Code)
+	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+		t.Fatalf("in-allowlist preflight status = %d, want the engine's answer", rec.Code)
+	}
+	if seen.Load() == nil {
+		t.Fatal("the preflight never reached the engine's CORS policy")
 	}
 }

@@ -100,15 +100,6 @@ func (f *facade) handlePlain(w http.ResponseWriter, r *http.Request) {
 			writeIngressError(w, d.Status, d.Code, d.Message)
 			return
 		}
-		// Answer a non-loopback preflight ahead of the credential check. It
-		// grants no access on its own; the request that follows still receives
-		// the real 401/403, and a browser sends no Authorization on a preflight
-		// anyway. A loopback preflight continues into handleHTTP so an engine's
-		// exact origin and credentials policy can be preserved (see proxy.go).
-		if d.Enabled && cors.IsPreflight(r) {
-			cors.WritePreflight(w, r)
-			return
-		}
 		if !d.Enabled {
 			slog.Warn("rejected non-loopback plaintext request; cluster peers must use mTLS",
 				"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
@@ -116,7 +107,13 @@ func (f *facade) handlePlain(w http.ResponseWriter, r *http.Request) {
 				"plaintext requests are accepted only from loopback; cluster peers must use the mTLS ingress")
 			return
 		}
-		if !d.Allowed {
+		// A browser sends no Authorization on a preflight, so a non-loopback
+		// preflight skips the credential check and continues into handleHTTP,
+		// which answers it from the engine's own CORS policy exactly as for a
+		// loopback caller. It grants no access on its own: the request that
+		// follows still receives the real 401/403.
+		preflight := cors.IsPreflight(r)
+		if !preflight && !d.Allowed {
 			slog.Warn("rejected non-loopback plaintext request", "remote", r.RemoteAddr,
 				"method", r.Method, "path", r.URL.Path, "code", d.Code, "key_fp", d.KeyFingerprint)
 			if d.Challenge != "" {
@@ -127,9 +124,11 @@ func (f *facade) handlePlain(w http.ResponseWriter, r *http.Request) {
 		}
 		// The key is the proxy's credential, not the engine's: never forward it.
 		f.host.lanAuth.StripCredential(r.Header)
-		// At Info, not Debug: a production log must show who used a key.
-		slog.Info("authenticated non-loopback plaintext request", "remote", r.RemoteAddr,
-			"method", r.Method, "path", r.URL.Path, "key_fp", d.KeyFingerprint)
+		if !preflight {
+			// At Info, not Debug: a production log must show who used a key.
+			slog.Info("authenticated non-loopback plaintext request", "remote", r.RemoteAddr,
+				"method", r.Method, "path", r.URL.Path, "key_fp", d.KeyFingerprint)
+		}
 	}
 	// Engine-manager marks its private identity/action requests so this
 	// compatibility facade can never be mistaken for the local Ollama backend.
