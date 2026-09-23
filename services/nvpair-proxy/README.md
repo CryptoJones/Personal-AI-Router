@@ -125,7 +125,10 @@ actionable warning while the primary listener stays available.
 
 **Cluster ingress.** The listener carries two personalities, demultiplexed by
 each connection's first byte. Plaintext HTTP is accepted only from loopback; a
-LAN caller is refused. When `--cluster-dir` shows this node is a cluster member,
+LAN caller is refused unless the operator has configured API keys
+(`NVPAIR_PROXY_API_KEYS_FILE`, `NVPAIR_PROXY_API_KEYS`, optionally narrowed by
+`NVPAIR_PROXY_ALLOWED_CIDRS`) and the caller presents one, in which case it is
+routed like a loopback client with the key stripped. When `--cluster-dir` shows this node is a cluster member,
 the same listener also terminates cluster mTLS: a peer whose client certificate
 matches one of this node's pins is forwarded straight to the local engine
 reported by `node/set-local-backend`, and is never re-routed onward to another

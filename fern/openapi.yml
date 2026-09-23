@@ -34,6 +34,12 @@ tags:
     description: OpenAI-compatible inference proxied to an eligible node.
   - name: Node info
     description: Read-only node telemetry polled from discovered PAIR nodes.
+# A credential is optional: loopback callers send none, and a caller on another
+# machine needs one only when the node's operator has enabled LAN access.
+security:
+  - {}
+  - bearerAuth: []
+  - apiKeyAuth: []
 paths:
   /api/chat:
     post:

@@ -112,10 +112,12 @@ bits; on Windows the check is skipped and the per-user data directory's ACL is
 the protection), that contains a malformed entry, or that cannot be read
 contributes no keys. That is judged per source: a rejected file does not
 disable keys supplied through `NVPAIR_PROXY_API_KEYS`, and with neither source
-yielding a key the LAN stays closed. The one group-readable shape the gate
-accepts is a root-owned file readable (not writable) only by a group the proxy
-itself belongs to, which is how Kubernetes mounts a Secret under a pod
-`fsGroup`.
+yielding a key the LAN stays closed. Group read is refused even for a group the
+proxy belongs to, since the gate cannot tell a group made for one workload from
+a shared one; a Kubernetes Secret mounted under a pod `fsGroup` is therefore
+refused, and the key belongs in `NVPAIR_PROXY_API_KEYS` instead. A preflight
+gets no exemption: a keyless `OPTIONS` is refused like any other request, so a
+browser, which cannot send a key on a preflight, is not a supported LAN client.
 Enabling the gate is logged at warning level at startup and whenever the key set
 changes. It adds no TLS, rate limiting, or per-key permissions: the plaintext
 personality stays plaintext, so use it only on a network you trust, and pair it

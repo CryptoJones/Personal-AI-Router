@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"strconv"
 
-	"nvpair-shared/cors"
 	"nvpair-shared/ingressauth"
 )
 
@@ -91,9 +90,8 @@ func (f *facade) handlePlain(w http.ResponseWriter, r *http.Request) {
 		if p := f.host.lanAuth; p != nil {
 			d = p.Authorize(r)
 		}
-		// A source outside the operator's allowlist gets nothing — not even a
-		// CORS-answered preflight — so the allowlist means what it says for
-		// OPTIONS too.
+		// A source outside the operator's allowlist gets nothing, and its key is
+		// never examined.
 		if d.Enabled && d.Code == ingressauth.CodeSourceNotAllowed {
 			slog.Warn("rejected non-loopback plaintext request", "remote", r.RemoteAddr,
 				"method", r.Method, "path", r.URL.Path, "code", d.Code)
@@ -107,13 +105,12 @@ func (f *facade) handlePlain(w http.ResponseWriter, r *http.Request) {
 				"plaintext requests are accepted only from loopback; cluster peers must use the mTLS ingress")
 			return
 		}
-		// A browser sends no Authorization on a preflight, so a non-loopback
-		// preflight skips the credential check and continues into handleHTTP,
-		// which answers it from the engine's own CORS policy exactly as for a
-		// loopback caller. It grants no access on its own: the request that
-		// follows still receives the real 401/403.
-		preflight := cors.IsPreflight(r)
-		if !preflight && !d.Allowed {
+		// A preflight is judged like any other request. Answering a keyless one
+		// would hand it to handleHTTP, which buffers the body, fans the OPTIONS
+		// out to every cluster candidate, and relays an engine's raw reply: none
+		// of that is for a caller who has shown no key. A browser, which cannot
+		// send a key on a preflight, is therefore not a supported LAN client.
+		if !d.Allowed {
 			slog.Warn("rejected non-loopback plaintext request", "remote", r.RemoteAddr,
 				"method", r.Method, "path", r.URL.Path, "code", d.Code, "key_fp", d.KeyFingerprint)
 			if d.Challenge != "" {
@@ -124,11 +121,9 @@ func (f *facade) handlePlain(w http.ResponseWriter, r *http.Request) {
 		}
 		// The key is the proxy's credential, not the engine's: never forward it.
 		f.host.lanAuth.StripCredential(r.Header)
-		if !preflight {
-			// At Info, not Debug: a production log must show who used a key.
-			slog.Info("authenticated non-loopback plaintext request", "remote", r.RemoteAddr,
-				"method", r.Method, "path", r.URL.Path, "key_fp", d.KeyFingerprint)
-		}
+		// At Info, not Debug: a production log must show who used a key.
+		slog.Info("authenticated non-loopback plaintext request", "remote", r.RemoteAddr,
+			"method", r.Method, "path", r.URL.Path, "key_fp", d.KeyFingerprint)
 	}
 	// Engine-manager marks its private identity/action requests so this
 	// compatibility facade can never be mistaken for the local Ollama backend.

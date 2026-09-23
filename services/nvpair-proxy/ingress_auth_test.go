@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -107,8 +108,8 @@ func TestHandlePlainXApiKeyAccepted(t *testing.T) {
 }
 
 // TestHandlePlainNonLoopbackWithoutKeyIs401: an enabled gate turns the LAN
-// refusal from 403 loopback-only into 401 with a challenge, still carrying CORS
-// so a browser can read it, and nothing is forwarded.
+// refusal from 403 loopback-only into 401 with a challenge, and nothing is
+// forwarded. The refusal grants no CORS: a browser is not a supported LAN client.
 func TestHandlePlainNonLoopbackWithoutKeyIs401(t *testing.T) {
 	f, seen := lanProxy(t)
 	rec := httptest.NewRecorder()
@@ -206,25 +207,31 @@ func TestHandlePlainInsideAllowedCIDRIsRouted(t *testing.T) {
 	}
 }
 
-// TestHandlePlainPreflightReachesEngineWhenEnabled: a browser sends no
-// Authorization on a preflight, so once the gate is on a keyless LAN preflight
-// must not be refused with 401; it is answered from the engine's own CORS
-// policy, as a loopback preflight is.
-func TestHandlePlainPreflightReachesEngineWhenEnabled(t *testing.T) {
+// TestHandlePlainKeylessPreflightIs401: a preflight gets no exemption. A keyless
+// LAN preflight is refused like any keyless request, reaches no engine, and has
+// its body left unread.
+func TestHandlePlainKeylessPreflightIs401(t *testing.T) {
 	f, seen := lanProxy(t)
+	body := &countingReader{r: strings.NewReader(strings.Repeat("x", 1<<16))}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", body)
 	req.RemoteAddr = lanRemote
 	req.Header.Set("Origin", "http://app.test")
 	req.Header.Set("Access-Control-Request-Method", "POST")
 	req.Header.Set("Access-Control-Request-Headers", "Authorization")
 	f.handlePlain(rec, req)
 
-	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
-		t.Fatalf("LAN preflight status = %d, want the engine's answer", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("keyless LAN preflight status = %d, want 401", rec.Code)
 	}
-	if seen.Load() == nil {
-		t.Fatal("the preflight never reached the engine's CORS policy")
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q on a refused preflight, want none", got)
+	}
+	if seen.Load() != nil {
+		t.Fatal("a keyless preflight reached the engine")
+	}
+	if n := body.n.Load(); n != 0 {
+		t.Fatalf("proxy read %d bytes of a keyless preflight body, want 0", n)
 	}
 }
 
@@ -248,7 +255,7 @@ func TestHandlePlainGateWithoutKeysKeepsLoopbackOnly(t *testing.T) {
 }
 
 // TestHandlePlainPreflightOutsideAllowedCIDRIs403: the allowlist applies to a
-// preflight too. A source the operator excluded gets no CORS answer that would
+// preflight too. A source the operator excluded gets no answer that would
 // let a browser proceed to the request that follows.
 func TestHandlePlainPreflightOutsideAllowedCIDRIs403(t *testing.T) {
 	f, seen := lanProxy(t, netip.MustParsePrefix("10.0.0.0/8"))
@@ -270,20 +277,14 @@ func TestHandlePlainPreflightOutsideAllowedCIDRIs403(t *testing.T) {
 	}
 }
 
-// TestHandlePlainPreflightInsideAllowedCIDRReachesEngine: inside the allowlist
-// the preflight is still answered without a credential, as browsers require.
-func TestHandlePlainPreflightInsideAllowedCIDRReachesEngine(t *testing.T) {
-	f, seen := lanProxy(t, netip.MustParsePrefix("192.0.2.0/24"))
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
-	req.RemoteAddr = lanRemote
-	req.Header.Set("Origin", "http://app.test")
-	req.Header.Set("Access-Control-Request-Method", "POST")
-	f.handlePlain(rec, req)
-	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
-		t.Fatalf("in-allowlist preflight status = %d, want the engine's answer", rec.Code)
-	}
-	if seen.Load() == nil {
-		t.Fatal("the preflight never reached the engine's CORS policy")
-	}
+// countingReader records how many bytes the proxy pulled from the client.
+type countingReader struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+func (c *countingReader) Read(b []byte) (int, error) {
+	n, err := c.r.Read(b)
+	c.n.Add(int64(n))
+	return n, err
 }

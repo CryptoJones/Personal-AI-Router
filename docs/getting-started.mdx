@@ -499,16 +499,22 @@ variables refine the behavior for headless or containerized nodes:
 `NVPAIR_PROXY_API_KEYS_FILE` names a different key file, `NVPAIR_PROXY_API_KEYS`
 supplies keys inline (comma-separated), and `NVPAIR_PROXY_ALLOWED_CIDRS` (for
 example `192.168.1.0/24,10.0.0.0/8`) additionally restricts which source networks
-may use a key at all. The file and inline keys are separate sources: a key
-file that is refused contributes no keys, but inline keys still work.
+may use a key at all. A key file that is refused contributes no keys but
+leaves inline keys working. The reverse does not hold: a malformed inline key or
+allowlist entry disables authenticated access entirely until it is corrected.
 
 On Kubernetes, supply the key through `NVPAIR_PROXY_API_KEYS` from a Secret
-with `valueFrom.secretKeyRef`. A Secret mounted as a file and pointed to by
-`NVPAIR_PROXY_API_KEYS_FILE` also works under a pod `fsGroup`, which mounts it
-root-owned and group-readable (`0440`): the proxy accepts group read on a
-root-owned file whose group it belongs to. Set the allowlist to the pod
-network's CIDR: on OVN-Kubernetes, a pod reaching a `hostNetwork` node on the same
-host arrives from its pod IP, not the node's address.
+with `valueFrom.secretKeyRef`. Do not mount the Secret as a key file: under a
+pod `fsGroup` it arrives group-readable, and the proxy refuses any key file a
+group can read, because it cannot tell a group made for one workload from a
+shared one. Set the allowlist to the pod network's CIDR: on OVN-Kubernetes, a
+pod reaching a `hostNetwork` node on the same host arrives from its pod IP, not
+the node's address.
+
+The endpoints serve applications, not web pages. A browser sends no key on the
+CORS preflight that precedes an authenticated request, and a keyless request
+from another machine is refused, so a web page on another machine cannot use
+this access.
 
 Understand what you are enabling. The connection is plain HTTP, so prompts and
 responses cross your network unencrypted, and anyone holding the key can use the

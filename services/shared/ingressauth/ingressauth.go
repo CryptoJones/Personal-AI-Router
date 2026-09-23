@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package ingressauth is the opt-in credential gate the inference proxies apply
-// to a plaintext request that did not arrive from loopback. Both proxies share
-// it for the same reason they share nvpair-shared/cors: the two must accept and
-// refuse an outside caller identically, and one implementation is what keeps
-// them from drifting.
+// Package ingressauth is the opt-in credential gate nvpair-proxy applies to a
+// plaintext request that did not arrive from loopback. The proxy holds one
+// gate and every engine facade consults it, so each accepts and refuses an
+// outside caller identically.
 //
-// With nothing configured the gate is disabled and the proxies keep their
+// With nothing configured the gate is disabled and the proxy keeps its
 // loopback-only behavior — a LAN caller is refused before this package is
 // consulted. An operator enables it by configuring at least one API key, either
 // in a key file (NVPAIR_PROXY_API_KEYS_FILE, default <appdir>/proxy-api-keys) or
@@ -264,9 +263,8 @@ func (g *Gate) enabledLocked() bool {
 // refreshes the key file once and answers from that single view, so the
 // enabled/disabled state and the key set a request is judged against cannot
 // change between two calls. The allowlist is checked before the credential,
-// so a caller outside it learns nothing about whether its key is valid — and
-// the proxy applies that source decision even to a preflight, which needs no
-// credential. Authorize does not write to the response; the proxy does, in
+// so a caller outside it learns nothing about whether its key is valid. A
+// preflight is judged like any other request. Authorize does not write to the response; the proxy does, in
 // its own error format.
 func (g *Gate) Authorize(r *http.Request) Decision {
 	g.mu.Lock()
