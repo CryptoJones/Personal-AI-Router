@@ -109,7 +109,7 @@ func TestHandlePlainXApiKeyAccepted(t *testing.T) {
 
 // TestHandlePlainNonLoopbackWithoutKeyIs401: an enabled gate turns the LAN
 // refusal from 403 loopback-only into 401 with a challenge, and nothing is
-// forwarded. The refusal grants no CORS: a browser is not a supported LAN client.
+// forwarded.
 func TestHandlePlainNonLoopbackWithoutKeyIs401(t *testing.T) {
 	f, seen := lanProxy(t)
 	rec := httptest.NewRecorder()
@@ -287,4 +287,28 @@ func (c *countingReader) Read(b []byte) (int, error) {
 	n, err := c.r.Read(b)
 	c.n.Add(int64(n))
 	return n, err
+}
+
+// TestHandlePlainKeyedPreflightIsRouted: a preflight that does carry a valid key
+// is routed like any authenticated request, with the key stripped.
+func TestHandlePlainKeyedPreflightIsRouted(t *testing.T) {
+	f, seen := lanProxy(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
+	req.RemoteAddr = lanRemote
+	req.Header.Set("Origin", "http://app.test")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Authorization", "Bearer "+lanKey)
+	f.handlePlain(rec, req)
+
+	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+		t.Fatalf("keyed LAN preflight status = %d, want it routed", rec.Code)
+	}
+	h := seen.Load()
+	if h == nil {
+		t.Fatal("a keyed preflight never reached the engine")
+	}
+	if got := h.Get("Authorization"); got != "" {
+		t.Errorf("engine saw Authorization %q, want it stripped", got)
+	}
 }

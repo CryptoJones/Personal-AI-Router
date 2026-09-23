@@ -17,8 +17,8 @@
 // Loopback callers are never asked for a key — the desktop application, the
 // terminal interface, and local tools are unaffected by enabling the gate.
 //
-// Every failure fails closed. A key file that cannot be read, is readable by
-// other users, or contains an entry that could never match over the wire
+// Every failure fails closed. A key file that cannot be read, is accessible to
+// its group or other users, or contains an entry that could never match over the wire
 // contributes no keys, the reason is logged, and the LAN stays closed. Keys are
 // held in memory only as SHA-256 digests and are compared in constant time; a
 // rejected credential is logged as a short digest fingerprint, never as itself.
@@ -264,8 +264,8 @@ func (g *Gate) enabledLocked() bool {
 // enabled/disabled state and the key set a request is judged against cannot
 // change between two calls. The allowlist is checked before the credential,
 // so a caller outside it learns nothing about whether its key is valid. A
-// preflight is judged like any other request. Authorize does not write to the response; the proxy does, in
-// its own error format.
+// preflight is judged like any other request. Authorize does not write to the
+// response; the proxy does, in its own error format.
 func (g *Gate) Authorize(r *http.Request) Decision {
 	g.mu.Lock()
 	g.refreshLocked()

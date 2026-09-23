@@ -35,7 +35,7 @@ func checkKeyFileAccessAs(info fs.FileInfo, euid int) error {
 		return fmt.Errorf("owned by uid %d, not by the proxy's user (uid %d)", uid, euid)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("permissions %04o allow other users to read it; chmod 600", perm)
+		return fmt.Errorf("permissions %04o grant access to its group or other users; chmod 600, or supply the key through NVPAIR_PROXY_API_KEYS", perm)
 	}
 	return nil
 }

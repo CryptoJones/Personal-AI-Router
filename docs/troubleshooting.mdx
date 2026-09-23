@@ -104,8 +104,11 @@ authenticated access with an API key; refer to
 The refusal then says what is missing:
 
 - `403` `loopback-only`: the node has no usable key configured. Check the node's
-  log; a key file that other users can read, or that contains a malformed entry,
-  is ignored and the reason is logged.
+  log; a key file that its group or other users can read, or that contains a
+  malformed entry,
+  is ignored and the reason is logged. A malformed `NVPAIR_PROXY_API_KEYS` or
+  `NVPAIR_PROXY_ALLOWED_CIDRS` entry turns authenticated access off entirely
+  until it is corrected.
 - `401` `unauthorized`: the request carried no key, or a key the node does not
   have. Send it as `Authorization: Bearer <key>` (or `X-Api-Key: <key>`). The
   node's log shows the first eight hex digits of the SHA-256 of the key it

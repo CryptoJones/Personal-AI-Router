@@ -106,8 +106,10 @@ run on a different host so that PAIR sees its real address.
 
 The gate compares keys in constant time, holds file keys in memory only as
 digests (a key supplied inline through the environment also remains in the
-process environment in clear, so prefer the file), never logs a presented key
-(a rejection logs a short digest fingerprint), and fails closed: a key file that other users can read (judged by Unix permission
+process environment in clear, so prefer the file where the proxy's own user or
+root can own it privately; on Kubernetes that is not possible without a
+group-readable mount, so use the variable there), never logs a presented key
+(a rejection logs a short digest fingerprint), and fails closed: a key file that its group or other users can read (judged by Unix permission
 bits; on Windows the check is skipped and the per-user data directory's ACL is
 the protection), that contains a malformed entry, or that cannot be read
 contributes no keys. That is judged per source: a rejected file does not
