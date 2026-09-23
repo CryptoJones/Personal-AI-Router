@@ -39,7 +39,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -441,10 +440,8 @@ func (g *Gate) logFileErrorLocked(msg string, err error) {
 
 // readKeyFile opens the key file and checks the opened handle — not a separate
 // stat — before reading, so the permissions, type, and owner it validates
-// belong to the file it reads. On Unix-like systems the file must belong to
-// the proxy's user (or root) and must not be readable or writable by group or
-// others; on Windows the mode bits carry no such meaning and the check is
-// skipped, leaving protection to the data directory's ACL.
+// belong to the file it reads. checkKeyFileAccess holds the per-platform
+// ownership and permission rules.
 func readKeyFile(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -458,12 +455,7 @@ func readKeyFile(path string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("not a regular file")
 	}
-	if runtime.GOOS != "windows" {
-		if perm := info.Mode().Perm(); perm&0o077 != 0 {
-			return nil, fmt.Errorf("permissions %04o allow other users to read it; chmod 600", perm)
-		}
-	}
-	if err := ownedByProcessUser(info); err != nil {
+	if err := checkKeyFileAccess(info); err != nil {
 		return nil, err
 	}
 	content, err := io.ReadAll(io.LimitReader(f, maxKeyFileBytes+1))

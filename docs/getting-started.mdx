@@ -499,7 +499,16 @@ variables refine the behavior for headless or containerized nodes:
 `NVPAIR_PROXY_API_KEYS_FILE` names a different key file, `NVPAIR_PROXY_API_KEYS`
 supplies keys inline (comma-separated), and `NVPAIR_PROXY_ALLOWED_CIDRS` (for
 example `192.168.1.0/24,10.0.0.0/8`) additionally restricts which source networks
-may use a key at all.
+may use a key at all. The file and inline keys are separate sources: a key
+file that is refused contributes no keys, but inline keys still work.
+
+On Kubernetes, supply the key through `NVPAIR_PROXY_API_KEYS` from a Secret
+with `valueFrom.secretKeyRef`. A Secret mounted as a file and pointed to by
+`NVPAIR_PROXY_API_KEYS_FILE` also works under a pod `fsGroup`, which mounts it
+root-owned and group-readable (`0440`): the proxy accepts group read on a
+root-owned file whose group it belongs to. Set the allowlist to the pod
+network's CIDR: on OVN-Kubernetes, a pod reaching a `hostNetwork` node on the same
+host arrives from its pod IP, not the node's address.
 
 Understand what you are enabling. The connection is plain HTTP, so prompts and
 responses cross your network unencrypted, and anyone holding the key can use the
